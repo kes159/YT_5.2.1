@@ -1,4 +1,4 @@
-name: Build YTPlus IPA (Stable)
+name: Build YTPlus IPA
 
 on:
   workflow_dispatch:
