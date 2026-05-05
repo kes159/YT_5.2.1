@@ -104,12 +104,20 @@ jobs:
           mv iPhoneOS16.5.sdk $THEOS/sdks/
           echo "SDKVERSION=16.5" >> $GITHUB_ENV
 
-      # ── 5. 원본 IPA 다운로드 (aria2c) ─────────────────────
+      # ── 5. 원본 IPA 다운로드 (Dropbox 403 에러 방지 최적화) ─────────────────────
       - name: Download Original IPA
         run: |
           URL="${{ github.event.inputs.decrypted_ipa_url }}"
+          # Dropbox 링크 변환
           [[ "$URL" == *"dropbox.com"* ]] && URL="${URL/dl=0/dl=1}"
-          aria2c -x 16 -s 16 -k 1M --console-log-level=warn "$URL" -o youtube.ipa
+          
+          # 연결 수를 줄이고(4개) 재시도 횟수 증가, User-Agent 설정
+          aria2c -x 4 -s 4 -k 1M \
+            --user-agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --retry-wait=5 \
+            --max-tries=10 \
+            --console-log-level=warn \
+            "$URL" -o youtube.ipa
 
       # ── 6. 스마트 트윅 소스 관리 (캐싱 및 증분 업데이트) ────────────
       - name: Cache Tweaks Source
@@ -125,7 +133,6 @@ jobs:
           mkdir -p ${{ github.workspace }}/tweaks_src
           cd ${{ github.workspace }}/tweaks_src
 
-          # 필수 헤더 및 트윅 리스트 정의
           REPOS=(
             "YouTubeHeader|https://github.com/PoomSmart/YouTubeHeader.git"
             "PSHeader|https://github.com/PoomSmart/PSHeader.git"
@@ -143,7 +150,6 @@ jobs:
           [[ "${{ github.event.inputs.enable_ycq }}" == "true" ]] && REPOS+=("YouChooseQuality|https://github.com/PoomSmart/YouChooseQuality.git")
           [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]] && REPOS+=("YTUHD|https://github.com/PoomSmart/YTUHD.git")
 
-          # 병렬 업데이트 수행
           for repo in "${REPOS[@]}"; do
             name="${repo%%|*}"
             url="${repo#*|}"
@@ -159,18 +165,13 @@ jobs:
           done
           wait
 
-          # 헤더를 Theos include 폴더로 배치
           mkdir -p $THEOS/include/YTHeaders
           [ -d "YouTubeHeader" ] && cp -R YouTubeHeader/* $THEOS/include/YTHeaders/
           [ -d "PSHeader" ] && cp -R PSHeader/* $THEOS/include/
 
-          # 모든 소스를 워크스페이스 루트로 복사
           cp -R . ${{ github.workspace }}/
-
-          # 워크스페이스 루트로 이동하여 패치 진행
           cd ${{ github.workspace }}
           
-          # 1. YCQ 패치
           if [[ "${{ github.event.inputs.enable_ycq }}" == "true" ]]; then
             YCQ_BUNDLE=$(find YouChooseQuality/layout -type d -name "*.bundle" 2>/dev/null | head -1)
             if [ -n "$YCQ_BUNDLE" ]; then
@@ -179,13 +180,10 @@ jobs:
             fi
           fi
 
-          # 2. DEMC 패치 (파일 존재 여부 확인 후 실행)
           if [[ "${{ github.event.inputs.enable_demc }}" == "true" ]]; then
             if [ -f "DontEatMyContent/Tweak.h" ]; then
               sed -i '' "s/^CGFloat constant;/extern CGFloat constant;/" DontEatMyContent/Tweak.h
               echo "✅ Applied build fix to DontEatMyContent"
-            else
-              echo "⚠️ Warning: DontEatMyContent/Tweak.h not found."
             fi
           fi
 
@@ -225,3 +223,4 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: "${{ steps.meta.outputs.release_title }}"
           files: ${{ steps.meta.outputs.ipa_name }}
+          
