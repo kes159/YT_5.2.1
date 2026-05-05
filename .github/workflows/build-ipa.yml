@@ -43,29 +43,14 @@ jobs:
       contents: write
 
     steps:
-      # ── 1. 메타데이터 추출 ───────────────────────
-      - name: Extract Metadata
-        id: meta
-        shell: bash
-        run: |
-          URL="${{ github.event.inputs.decrypted_ipa_url }}"
-          # URL에서 마지막 버전 패턴 추출 (앞의 5.2.1 트윅버전이 아닌 유튜브버전)
-          # 예: YTPlus_5.2.1_21.16.2.ipa → 21.16.2
-          YT_VERSION=$(echo "$URL" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1)
-          if [[ -z "$YT_VERSION" ]]; then YT_VERSION="Unknown"; fi
-          echo "ipa_name=YTPlus_5.2.1_${YT_VERSION}.ipa" >> "$GITHUB_OUTPUT"
-          echo "release_name=YTPlus_5.2.1_${YT_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=YTPlus_5.2.1_${YT_VERSION}" >> "$GITHUB_OUTPUT"
-
-      # ── 2. 저장소 체크아웃 ────────────────────────
+      # ── 1. 저장소 체크아웃 ────────────────────────
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      # ── 3. Homebrew 캐시 복원 ─────────────────────
-      # brew install make ldid dpkg aria2: 매번 32s → 캐시 히트 시 ~3s
+      # ── 2. Homebrew 캐시 복원 ─────────────────────
       - name: Cache Homebrew packages
         id: brew-cache
         uses: actions/cache@v4
@@ -83,7 +68,6 @@ jobs:
           key: brew-${{ runner.os }}-make-ldid-dpkg-aria2-v1
 
       # ── cyan(pyzule) 캐시 복원 ─────────────────────
-      # pipx install cyan: 매번 35s → 캐시 히트 시 ~0s
       - name: Cache cyan (pyzule-rw)
         id: cyan-cache
         uses: actions/cache@v4
@@ -94,19 +78,17 @@ jobs:
             ~/.local/bin/cgen
           key: cyan-pyzule-rw-${{ runner.os }}-v1
 
-      # ── 4. 도구 설치 (캐시 미스 시에만 실제 brew install) ─────────
+      # ── 3. 도구 설치 (캐시 미스 시에만 실제 brew install) ─────────
       - name: Install Build Tools
         shell: bash
         run: |
           if [[ "${{ steps.brew-cache.outputs.cache-hit }}" != "true" ]]; then
             brew install make ldid dpkg aria2
           else
-            # 캐시 복원 후 심링크 재연결
             brew link --overwrite make ldid dpkg aria2 2>/dev/null || true
           fi
           echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
 
-          # cyan(pyzule-rw) 설치 — 캐시 히트 시 건너뜀 (35s 절감)
           if [[ "${{ steps.cyan-cache.outputs.cache-hit }}" != "true" ]]; then
             python3 -m pip install --upgrade pipx --break-system-packages 2>/dev/null || true
             python3 -m pipx ensurepath
@@ -127,8 +109,7 @@ jobs:
           fi
           echo "cyan 확인: $(which cyan)"
 
-      # ── 5. Theos 캐시 복원 ────────────────────────
-      # git clone theos: 매번 52s → 캐시 히트 시 ~3s
+      # ── 4. Theos 캐시 복원 ────────────────────────
       - name: Cache Theos
         id: theos-cache
         uses: actions/cache@v4
@@ -136,9 +117,10 @@ jobs:
           path: ${{ github.workspace }}/theos
           key: theos-${{ runner.os }}-v1
 
-      # ── 6. Theos 설치 + SDK 다운로드 + IPA 다운로드 (병렬) ──────────
-      # Theos 설치(52s)와 IPA 다운로드(5s)를 동시에 실행
+      # ── 5. Theos 설치 + SDK 다운로드 + IPA 다운로드 (병렬) ──────────
+      #   IPA 다운 완료 후 plist에서 YT 버전을 읽어 메타데이터 출력
       - name: Setup Theos and Download IPA
+        id: meta
         shell: bash
         run: |
           echo "SDKVERSION=16.5" >> $GITHUB_ENV
@@ -157,7 +139,6 @@ jobs:
               https://github.com/theos/theos.git $THEOS
             mkdir -p $THEOS/sdks
 
-            # SDK 다운로드도 백그라운드
             git clone --quiet --depth=1 https://github.com/theos/sdks/ /tmp/theos-sdks &
             SDK_PID=$!
 
@@ -171,7 +152,42 @@ jobs:
           wait $IPA_PID
           echo "IPA 다운로드 완료: $(ls -lh youtube.ipa | awk '{print $5}')"
 
-      # ── 7. 트윅 캐시 확인 및 선택적 클론/빌드 ────────────────────────
+          # ── plist에서 YouTube 버전 추출 ─────────────────────────────
+          # IPA 압축 해제 → Payload/YouTube.app/Info.plist 파싱
+          WORK_DIR=$(mktemp -d)
+          unzip -q youtube.ipa -d "$WORK_DIR"
+
+          # App 디렉토리 위치 탐색 (이름이 달라질 수 있으므로 glob 사용)
+          PLIST=$(find "$WORK_DIR/Payload" -maxdepth 2 -name "Info.plist" | head -1)
+
+          if [[ -n "$PLIST" ]]; then
+            # CFBundleShortVersionString = YouTube 앱 버전 (예: 19.17.3)
+            YT_VERSION=$(plutil -extract CFBundleShortVersionString raw "$PLIST" 2>/dev/null || true)
+            # 파싱 실패 시 CFBundleVersion으로 폴백
+            if [[ -z "$YT_VERSION" ]]; then
+              YT_VERSION=$(plutil -extract CFBundleVersion raw "$PLIST" 2>/dev/null || true)
+            fi
+          fi
+
+          # 최후 폴백: URL에서 추출
+          if [[ -z "$YT_VERSION" ]]; then
+            echo "⚠️  plist 파싱 실패, URL에서 버전 추출 시도"
+            YT_VERSION=$(echo "$URL" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1)
+          fi
+          if [[ -z "$YT_VERSION" ]]; then YT_VERSION="Unknown"; fi
+
+          rm -rf "$WORK_DIR"
+
+          echo "📦 YouTube 버전: $YT_VERSION"
+
+          # TWEAK_VERSION은 고정값 (YTPlus 트윅 버전)
+          TWEAK_VERSION="5.2.1"
+
+          echo "ipa_name=YTPlus_${TWEAK_VERSION}_${YT_VERSION}.ipa" >> "$GITHUB_OUTPUT"
+          echo "release_name=YTPlus_${TWEAK_VERSION}_${YT_VERSION}"            >> "$GITHUB_OUTPUT"
+          echo "tag=YTPlus_${TWEAK_VERSION}_${YT_VERSION}"                     >> "$GITHUB_OUTPUT"
+
+      # ── 6. 트윅 캐시 확인 및 선택적 클론/빌드 ────────────────────────
       - name: Check Cache and Build Tweaks Selectively
         shell: bash
         env:
@@ -210,7 +226,7 @@ jobs:
           echo "  SHA 조회 (병렬)"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # ── 1단계: SHA 조회 전부 병렬 (순차 7.4s → ~1s) ────────────
+          # ── 1단계: SHA 조회 전부 병렬 ─────────────────────────────────
           for repo in "${REPOS[@]}"; do
             NAME="${repo%%|*}"; rest="${repo#*|}"
             URL="${rest%%|*}";  ENABLED="${rest#*|}"
@@ -228,14 +244,13 @@ jobs:
             SHA_PIDS+=($!)
           done
 
-          # SHA 조회 완료 대기
           for pid in "${SHA_PIDS[@]}"; do wait "$pid" || true; done
 
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  캐시 확인 + 클론 예약"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # ── 2단계: 캐시 확인 + 클론 병렬 예약 ─────────────────────
+          # ── 2단계: 캐시 확인 + 클론 병렬 예약 ─────────────────────────
           for repo in "${REPOS[@]}"; do
             NAME="${repo%%|*}"; rest="${repo#*|}"
             URL="${rest%%|*}";  ENABLED="${rest#*|}"
@@ -261,7 +276,7 @@ jobs:
             fi
           done
 
-          # ── 3단계: 클론 완료 대기 ───────────────────────────────
+          # ── 3단계: 클론 완료 대기 ──────────────────────────────────────
           if [[ ${#CLONE_PIDS[@]} -gt 0 ]]; then
             echo ""
             echo "  ⏳ 클론 완료 대기 (${#CLONE_PIDS[@]}개)..."
@@ -269,7 +284,7 @@ jobs:
             echo "  모든 클론 완료"
           fi
 
-          # ── 4단계: 헤더 구조화 ──────────────────────────────────
+          # ── 4단계: 헤더 구조화 ────────────────────────────────────────
           if [[ -d "$BUILD_DIR/YouTubeHeader" ]]; then
             mkdir -p $THEOS/include/YouTubeHeader
             cp -R "$BUILD_DIR/YouTubeHeader/." $THEOS/include/YouTubeHeader/
@@ -282,7 +297,7 @@ jobs:
             cp -R "$BUILD_DIR/PSHeader/." $THEOS/include/
           fi
 
-          # ── 5단계: DontEatMyContent 패치 ────────────────────────
+          # ── 5단계: DontEatMyContent 패치 ──────────────────────────────
           if [[ -d "$BUILD_DIR/DontEatMyContent" ]]; then
             sed -i '' "s/^CGFloat constant;/extern CGFloat constant;/" \
               "$BUILD_DIR/DontEatMyContent/Tweak.h"
@@ -291,7 +306,7 @@ jobs:
             ' "$BUILD_DIR/DontEatMyContent/Tweak.x"
           fi
 
-          # ── 6단계: 병렬 빌드 (순차 101s → ~35s) ────────────────────
+          # ── 6단계: 병렬 빌드 ──────────────────────────────────────────
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  빌드 (병렬)"
@@ -303,7 +318,6 @@ jobs:
           HEADER_ONLY="YouTubeHeader PSHeader YouGroupSettings YTVideoOverlay"
 
           for NAME in "${CLONE_LIST[@]}"; do
-            # 헤더 전용은 컴파일 불필요
             if echo "$HEADER_ONLY" | grep -qw "$NAME"; then
               echo "  📎 $NAME — 헤더/의존성 전용, 건너뜀"
               continue
@@ -315,9 +329,7 @@ jobs:
 
             echo "  🔨 $NAME 빌드 시작 (백그라운드)..."
 
-            # 각 트윅을 백그라운드에서 병렬 빌드
             (
-              # YTUHD: libvpx 별도 빌드
               if [[ "$NAME" == "YTUHD" && -d "$DIR/vendor/libvpx" ]]; then
                 pushd "$DIR/vendor/libvpx" > /dev/null
                 ./configure --target=arm64-darwin-gcc \
@@ -337,7 +349,6 @@ jobs:
                     cp "$deb" "$READY_DIR/"
                     rm -f "$CACHE_DIR/${NAME}_"*.deb
                     cp "$deb" "$CACHE_DIR/${NAME}_${SHA}.deb"
-                    # 캐시 갱신 신호 (파일로)
                     touch "$SHA_STORE/CACHE_UPDATED"
                     echo "  💾 캐시 저장: ${NAME}_${SHA}.deb"
                   done
@@ -353,14 +364,12 @@ jobs:
             BUILD_NAMES+=("$NAME")
           done
 
-          # 모든 병렬 빌드 완료 대기
           if [[ ${#BUILD_PIDS[@]} -gt 0 ]]; then
             echo "  ⏳ 빌드 완료 대기 (${#BUILD_PIDS[@]}개)..."
             for pid in "${BUILD_PIDS[@]}"; do wait "$pid" || true; done
             echo "  모든 빌드 완료"
           fi
 
-          # CACHE_UPDATED 판정
           if [[ -f "$SHA_STORE/CACHE_UPDATED" ]]; then
             CACHE_UPDATED=true
           fi
@@ -373,7 +382,7 @@ jobs:
 
           echo "CACHE_UPDATED=$CACHE_UPDATED" >> $GITHUB_ENV
 
-      # ── 8. 새 캐시가 있으면 저장소에 push ────────────────────────
+      # ── 7. 새 캐시가 있으면 저장소에 push ────────────────────────
       - name: Commit Updated Tweak Cache
         if: env.CACHE_UPDATED == 'true'
         shell: bash
@@ -384,7 +393,7 @@ jobs:
           git commit -m "chore: 트윅 캐시 업데이트 [skip ci]"
           git push
 
-      # ── 9. 인젝션 및 릴리스 ──────────────────────────────────────
+      # ── 8. 인젝션 및 릴리스 ──────────────────────────────────────
       - name: Inject and Release
         shell: bash
         run: |
@@ -414,3 +423,5 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.release_name }}
           files: ${{ steps.meta.outputs.ipa_name }}
+          overwrite_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}
