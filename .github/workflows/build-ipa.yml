@@ -102,7 +102,8 @@ jobs:
 
       - name: Install Build Tools
         run: |
-          brew install make ldid dpkg
+          # [최적화] 멀티 스레드 다운로드를 위해 aria2 추가 설치
+          brew install make ldid dpkg aria2
           echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           if ! command -v cyan &> /dev/null; then
@@ -112,7 +113,6 @@ jobs:
       # ── 4. [최적화] Theos Shallow Clone 및 SDK 캐싱 ───────
       - name: Setup Theos (Shallow)
         run: |
-          # [최적화] --depth=1과 shallow submodules로 데이터 전송 최소화
           git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/theos/theos.git $THEOS
           echo "THEOS=$THEOS" >> $GITHUB_ENV
 
@@ -121,12 +121,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos/sdks/iPhoneOS16.5.sdk
-          key: ios-sdk-16.5 # SDK 버전 고정 캐시
+          key: ios-sdk-16.5
 
       - name: Download iOS SDK (Conditional)
         if: steps.cache-sdk.outputs.cache-hit != 'true'
         run: |
-          # [최적화] 캐시가 없을 때만 필요한 SDK 버전만 정밀 클론
           git clone --quiet -n --depth=1 --filter=tree:0 https://github.com/theos/sdks/
           cd sdks
           git sparse-checkout set --no-cone iPhoneOS16.5.sdk
@@ -135,15 +134,22 @@ jobs:
           mv iPhoneOS16.5.sdk $THEOS/sdks/
           echo "SDKVERSION=16.5" >> $GITHUB_ENV
 
-      # ── 5. 원본 IPA 다운로드 (Dropbox 대응) ─────────────────────
+      # ── 5. [최적화] 원본 IPA 멀티 스레드 다운로드 ─────────────────────
       - name: Download Original IPA
         run: |
           URL="${{ github.event.inputs.decrypted_ipa_url }}"
+          # Dropbox 직링크 변환
           if [[ "$URL" == *"dropbox.com"* ]]; then
             URL="${URL/dl=0/dl=1}"
           fi
-          wget -q --show-progress "$URL" -O youtube.ipa
-          if [ ! -s youtube.ipa ]; then exit 1; fi
+          
+          # [최적화] aria2c를 사용하여 16개 커넥션으로 다운로드 가속
+          aria2c -x 16 -s 16 -k 1M --console-log-level=warn "$URL" -o youtube.ipa
+          
+          if [ ! -s youtube.ipa ]; then
+            echo "❌ IPA Download Failed"
+            exit 1
+          fi
 
       # ── 6. 트윅 소스 확보 및 커스텀 패치 ───────────────────
       - name: Prepare Selected Tweaks
@@ -211,7 +217,6 @@ jobs:
           for dir in */; do
             if [[ -f "$dir/Makefile" ]]; then
               cd "$dir"
-              # [최적화] 멀티코어 병렬 빌드로 컴파일 속도 가속
               make -j$(sysctl -n hw.ncpu) clean package DEBUG=0 FINALPACKAGE=1 SIDELOAD=1 SDKVERSION=16.5
               find . -name "*.deb" -exec cp {} ${{ github.workspace }}/ready_packages/ \;
               cd ..
