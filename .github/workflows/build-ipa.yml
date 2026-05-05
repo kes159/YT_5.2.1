@@ -59,6 +59,9 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   THEOS: ${{ github.workspace }}/theos
+  # [최적화] Homebrew 자동 업데이트 및 클린업 방지
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
 
 jobs:
   build:
@@ -68,21 +71,15 @@ jobs:
       contents: write
 
     steps:
-      # ── 1. 메타데이터 및 버전 추출 (요청 사항 반영) ───────────────────────
+      # ── 1. 메타데이터 및 버전 추출 ───────────────────────
       - name: Extract Metadata
         id: meta
         run: |
-          # 입력받은 URL에서 유튜브 버전 추출 (예: 21.18.4)
           URL="${{ github.event.inputs.decrypted_ipa_url }}"
           YT_VERSION=$(echo "$URL" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           if [[ -z "$YT_VERSION" ]]; then YT_VERSION="Unknown"; fi
-          
-          # 트윅 버전 고정 (5.2.1)
           TWEAK_VERSION="5.2.1"
-          
-          # 요청하신 형식: YTPlus_5.2.1_21.18.4
           COMBINED_NAME="YTPlus_${TWEAK_VERSION}_${YT_VERSION}"
-          
           echo "ipa_name=${COMBINED_NAME}.ipa" >> "$GITHUB_OUTPUT"
           echo "release_title=${COMBINED_NAME}" >> "$GITHUB_OUTPUT"
           echo "tag=v${YT_VERSION}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
@@ -91,55 +88,61 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ── 3. 빌드 도구 설치 및 환경 설정 ──────────────────────
+      # ── 3. [최적화] 빌드 도구 캐싱 및 설치 ──────────────────
+      - name: Cache Homebrew
+        id: cache-brew
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/homebrew/bin
+            /opt/homebrew/Cellar
+          key: ${{ runner.os }}-brew-v1 # 도구 변경 시 v1을 v2로 수정
+
       - name: Install Build Tools
         run: |
-          brew install make ldid dpkg wget
+          # [최적화] 이미 설치된 wget은 제외, ldid/dpkg만 설치
+          brew install make ldid dpkg
           echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
-          pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
+          
+          # [최적화] pipx 캐싱 대신 도구 유무 확인 후 설치
+          if ! command -v cyan &> /dev/null; then
+            pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
+          fi
 
-      # ── 4. Theos 및 iOS SDK 설정 (핵심 수정) ─────────────────
+      # ── 4. [최적화] Theos 및 iOS SDK 설정 (Shallow Clone) ───────
       - name: Setup Theos
         run: |
-          git clone --recursive https://github.com/theos/theos.git $THEOS
+          # [최적화] --depth=1과 shallow submodules로 클론 시간 단축
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/theos/theos.git $THEOS
           echo "THEOS=$THEOS" >> $GITHUB_ENV
 
       - name: Download iOS SDK
         run: |
+          # [최적화] Sparse-checkout을 이용해 16.5 SDK만 정밀 타격
           git clone --quiet -n --depth=1 --filter=tree:0 https://github.com/theos/sdks/
-          cd sdks && git sparse-checkout set --no-cone iPhoneOS16.5.sdk && git checkout
+          cd sdks
+          git sparse-checkout set --no-cone iPhoneOS16.5.sdk
+          git checkout
           mkdir -p $THEOS/sdks
           mv iPhoneOS16.5.sdk $THEOS/sdks/
           echo "SDKVERSION=16.5" >> $GITHUB_ENV
 
-      # ── 5. 원본 IPA 다운로드 (Dropbox 자동 변환 로직 추가) ─────────────────────────────
+      # ── 5. 원본 IPA 다운로드 (Dropbox 대응) ─────────────────────
       - name: Download Original IPA
         run: |
           URL="${{ github.event.inputs.decrypted_ipa_url }}"
-          
-          # 드롭박스 링크일 경우 dl=0을 dl=1로 강제 치환
           if [[ "$URL" == *"dropbox.com"* ]]; then
             URL="${URL/dl=0/dl=1}"
-            echo "ℹ️ 드롭박스 링크 감지: 직접 다운로드 모드(dl=1)로 전환합니다."
           fi
-          
-          # 다운로드 시도
+          # [최적화] -q(quiet)와 --show-progress 조합으로 로그 깔끔하게 유지
           wget -q --show-progress "$URL" -O youtube.ipa
           
-          # 파일 유효성 검사
           if [ ! -s youtube.ipa ]; then
-            echo "❌ 에러: IPA 파일이 비어 있습니다. URL을 확인하세요."
-            exit 1
-          fi
-          
-          if ! file youtube.ipa | grep -q "Zip archive data"; then
-            echo "❌ 에러: 다운로드된 파일이 유효한 IPA 형식이 아닙니다."
-            echo "현재 파일 내용 요약:"
-            head -n 5 youtube.ipa
+            echo "❌ IPA Download Failed"
             exit 1
           fi
 
-      # ── 6. 트윅 소스 확보 및 커스텀 패치 ───────────────────
+      # ── 6. 트윅 소스 확보 및 커스텀 패치 (상동) ───────────────────
       - name: Prepare Selected Tweaks
         run: |
           cd $THEOS/include
@@ -151,7 +154,6 @@ jobs:
           git clone --quiet --depth=1 https://github.com/PoomSmart/YouGroupSettings.git
           git clone --quiet --depth=1 https://github.com/PoomSmart/YTVideoOverlay.git
 
-          # 조건부 클론 로직
           [[ "${{ github.event.inputs.enable_youpip }}" == "true" ]] && git clone --quiet --depth=1 https://github.com/PoomSmart/YouPiP.git
           [[ "${{ github.event.inputs.enable_yq }}" == "true" ]] && git clone --quiet --depth=1 https://github.com/PoomSmart/YouQuality.git
           [[ "${{ github.event.inputs.enable_ryd }}" == "true" ]] && git clone --quiet --depth=1 https://github.com/PoomSmart/Return-YouTube-Dislikes.git
@@ -159,25 +161,17 @@ jobs:
           [[ "${{ github.event.inputs.enable_youloop }}" == "true" ]] && git clone --quiet --depth=1 https://github.com/bhackel/YouLoop.git
           [[ "${{ github.event.inputs.enable_youspeed }}" == "true" ]] && git clone --quiet --depth=1 https://github.com/PoomSmart/YouSpeed.git
           
-          # YTUHD 처리
           if [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]]; then
             git clone --quiet --depth=1 --recurse-submodules https://github.com/PoomSmart/YTUHD.git
             mkdir -p $THEOS/include/vpx && cp YTUHD/vendor/libvpx/vpx/*.h $THEOS/include/vpx/
             mkdir -p YTUHD/vendor/libvpx_ios
-            PREBUILT_LIB="${{ github.workspace }}/vendor/lib/libvpx.a"
-            if [ -f "$PREBUILT_LIB" ]; then
-              cp "$PREBUILT_LIB" YTUHD/vendor/libvpx_ios/libvpx.a
-            else
-              if [[ "$OSTYPE" == "darwin"* ]]; then brew install gas-preprocessor; fi
-              cd YTUHD/vendor/libvpx
-              ./configure --target=arm64-darwin-gcc --disable-examples --disable-tools --disable-docs --disable-unit-tests --disable-vp8 --disable-vp9-encoder --enable-vp9-decoder --enable-pic
-              make -j$(sysctl -n hw.ncpu) libvpx.a
-              cp libvpx.a ../libvpx_ios/libvpx.a
-              cd ${{ github.workspace }}
-            fi
+            cd YTUHD/vendor/libvpx
+            ./configure --target=arm64-darwin-gcc --disable-examples --disable-tools --disable-docs --disable-unit-tests --disable-vp8 --disable-vp9-encoder --enable-vp9-decoder --enable-pic
+            make -j$(sysctl -n hw.ncpu) libvpx.a
+            cp libvpx.a ../libvpx_ios/libvpx.a
+            cd ${{ github.workspace }}
           fi
 
-          # YouChooseQuality (핵심: 모든 줄의 들여쓰기 유지)
           if [[ "${{ github.event.inputs.enable_ycq }}" == "true" ]]; then
             git clone --quiet --depth=1 https://github.com/PoomSmart/YouChooseQuality.git
             YCQ_BUNDLE=$(find YouChooseQuality/layout -type d -name "*.bundle" 2>/dev/null | head -1)
@@ -198,11 +192,9 @@ jobs:
           "QUALITY_FOR_SCENARIO_4_SHORT" = "저전력 모드";
           "QUALITY_FOR_SCENARIO_4" = "저전력 모드 활성화 시 기본 화질";
           KOEOF
-              echo "" >> "$YCQ_BUNDLE/ko.lproj/Localizable.strings"
             fi
           fi
 
-          # DontEatMyContent (패치)
           if [[ "${{ github.event.inputs.enable_demc }}" == "true" ]]; then
             git clone --quiet --depth=1 https://github.com/therealFoxster/DontEatMyContent.git
             sed -i '' "s/^CGFloat constant;/extern CGFloat constant;/" DontEatMyContent/Tweak.h
@@ -213,39 +205,28 @@ jobs:
       - name: Compile and Collect Tweaks
         run: |
           mkdir -p ${{ github.workspace }}/ready_packages
-
-          # 7-1. 직접 컴파일하는 트윅들 처리
           for dir in */; do
             if [[ -f "$dir/Makefile" ]]; then
-              echo "🛠️ Compiling: $dir"
               cd "$dir"
-              make clean package DEBUG=0 FINALPACKAGE=1 SIDELOAD=1 SDKVERSION=16.5
+              # [최적화] 병렬 빌드(-j) 적용하여 컴파일 속도 향상
+              make -j$(sysctl -n hw.ncpu) clean package DEBUG=0 FINALPACKAGE=1 SIDELOAD=1 SDKVERSION=16.5
               find . -name "*.deb" -exec cp {} ${{ github.workspace }}/ready_packages/ \;
               cd ..
             fi
           done
 
-          # 7-2. 저장소의 tweaks/ 폴더에 이미 있는 .deb 파일 수집 (핵심)
           if [[ -d "tweaks" ]]; then
-            echo "📦 tweaks 폴더에서 기존 패치 파일을 복사합니다."
             cp tweaks/*.deb ${{ github.workspace }}/ready_packages/ 2>/dev/null || true
           fi
-          
-          echo "✅ 최종 수집된 .deb 목록:"
-          ls -l ${{ github.workspace }}/ready_packages/
 
       # ── 8. IPA 인젝션 (Cyan) ───────────────────────────
       - name: Final Injection
         run: |
-          # 수집된 모든 .deb 파일의 전체 경로를 가져옵니다.
           EXTRA_TWEAKS=$(ls ${{ github.workspace }}/ready_packages/*.deb 2>/dev/null | tr '\n' ' ')
-          
           if [[ -z "$EXTRA_TWEAKS" ]]; then
-            echo "❌ 에러: 주입할 트윅 파일(.deb)을 찾을 수 없습니다."
+            echo "❌ No DEB files found"
             exit 1
           fi
-
-          echo "🚀 주입 대상: $EXTRA_TWEAKS"
 
           cyan -i ./youtube.ipa \
                -o "${{ steps.meta.outputs.ipa_name }}" \
@@ -253,12 +234,11 @@ jobs:
                -n "${{ github.event.inputs.app_name }}" \
                -b "${{ github.event.inputs.bundle_id }}"
 
-      # ── 9. 결과물 배포 (Release Title 수정) ────────────────────────
+      # ── 9. 결과물 배포 ──────────────────────────────
       - name: Release IPA
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          # 릴리즈 제목을 YTPlus_5.2.1_21.18.4 형식으로 설정
           name: "${{ steps.meta.outputs.release_title }}"
           files: ${{ steps.meta.outputs.ipa_name }}
           draft: false
