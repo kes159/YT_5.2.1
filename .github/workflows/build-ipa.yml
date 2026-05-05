@@ -159,18 +159,47 @@ jobs:
           [[ "${{ github.event.inputs.enable_youloop }}" == "true" ]] && git clone --quiet --depth=1 https://github.com/bhackel/YouLoop.git
           [[ "${{ github.event.inputs.enable_youspeed }}" == "true" ]] && git clone --quiet --depth=1 https://github.com/PoomSmart/YouSpeed.git
           
-          # YTUHD: 컴파일 대신 미리 빌드된 라이브러리 사용 (수정본)
+          # YTUHD: 컴파일 대신 미리 빌드된 라이브러리 사용
           if [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]]; then
             git clone --quiet --depth=1 --recurse-submodules https://github.com/PoomSmart/YTUHD.git
             
+            # 1. 헤더 파일 복사
+            mkdir -p $THEOS/include/vpx && cp YTUHD/vendor/libvpx/vpx/*.h $THEOS/include/vpx/
+            
+            # 2. 미리 빌드된 파일 확인 및 복사
+            mkdir -p YTUHD/vendor/libvpx_ios
+            PREBUILT_LIB="${{ github.workspace }}/vendor/lib/libvpx.a"
+
+            if [ -f "$PREBUILT_LIB" ]; then
+              cp "$PREBUILT_LIB" YTUHD/vendor/libvpx_ios/libvpx.a
+              echo "✅ 미리 빌드된 libvpx.a를 사용합니다."
+            else
+              echo "⚠️ 미리 빌드된 파일이 없어 새로 컴파일을 시도합니다."
+              
+              # --- [여기부터 의존성 도구 설치 코드] ---
+              if [[ "$OSTYPE" == "darwin"* ]]; then
+                echo "Installing dependencies for macOS..."
+                brew install gas-preprocessor
+              fi
+              # --- [여기까지] ---
+
+              cd YTUHD/vendor/libvpx
+              ./configure --target=arm64-darwin-gcc --disable-examples --disable-tools --disable-docs --disable-unit-tests --disable-vp8 --disable-vp9-encoder --enable-vp9-decoder --enable-pic
+              make -j$(sysctl -n hw.ncpu) libvpx.a
+              cp libvpx.a ../libvpx_ios/libvpx.a
+              cd ${{ github.workspace }}
+            fi
+          fi
+          
             # 헤더 파일 복사는 유지
             mkdir -p $THEOS/include/vpx && cp YTUHD/vendor/libvpx/vpx/*.h $THEOS/include/vpx/
             
             # [핵심] 컴파일(configure/make) 과정을 생략하고 저장소의 파일을 복사
             mkdir -p YTUHD/vendor/libvpx_ios
-            if [ -f "vendor/lib/libvpx.a" ]; then
-              cp vendor/lib/libvpx.a YTUHD/vendor/libvpx_ios/libvpx.a
-              echo "✅ 미리 빌드된 libvpx.a를 사용합니다."
+            PREBUILT_VPX="${{ github.workspace }}/vendor/lib/libvpx.a"
+            if [ -f "$PREBUILT_VPX" ]; then
+              cp "$PREBUILT_VPX" "YTUHD/vendor/libvpx_ios/libvpx.a"
+              echo "✅ 미리 빌드된 libvpx.a를 성공적으로 복사했습니다."
             else
               echo "⚠️ 경고: 미리 빌드된 파일이 없어 새로 컴파일을 시도합니다."
               cd YTUHD/vendor/libvpx
@@ -184,16 +213,36 @@ jobs:
           # YouChooseQuality (로컬라이제이션)
           if [[ "${{ github.event.inputs.enable_ycq }}" == "true" ]]; then
             git clone --quiet --depth=1 https://github.com/PoomSmart/YouChooseQuality.git
+            
+            # 번들 경로 찾기
             YCQ_BUNDLE=$(find YouChooseQuality/layout -type d -name "*.bundle" 2>/dev/null | head -1)
+            
             if [[ -n "$YCQ_BUNDLE" ]]; then
               mkdir -p "$YCQ_BUNDLE/ko.lproj"
+              
+              # --- [여기부터 인코딩 및 줄바꿈 최적화 코드] ---
+              # 'KOEOF'를 따옴표로 감싸면 내부의 특수문자가 변형되지 않고 그대로 기록됩니다.
               cat > "$YCQ_BUNDLE/ko.lproj/Localizable.strings" << 'KOEOF'
           "TWEAK_NAME" = "YouChooseQuality";
-          "TWEAK_DESC" = "상황별 화질 자동 선택 도구";
+          "TWEAK_DESC" = "각 상황별로 지정한 화질과 동일하거나 가장 가까운 화질을 자동으로 선택합니다.";
           "ENABLED" = "활성화";
-          "QUALITY_FOR_SCENARIO_0" = "Wi-Fi 기본 화질";
-          "QUALITY_FOR_SCENARIO_1" = "셀룰러 기본 화질";
+          "QUALITY_FOR_SCENARIO_0_SHORT" = "Wi-Fi";
+          "QUALITY_FOR_SCENARIO_0" = "Wi-Fi 연결 시 기본 화질";
+          "QUALITY_FOR_SCENARIO_1_SHORT" = "셀룰러";
+          "QUALITY_FOR_SCENARIO_1" = "셀룰러(모바일 데이터) 연결 시 기본 화질";
+          "QUALITY_FOR_SCENARIO_2_SHORT" = "Wi-Fi (AirPlay)";
+          "QUALITY_FOR_SCENARIO_2" = "AirPlay 사용 중 Wi-Fi 연결 시 기본 화질";
+          "QUALITY_FOR_SCENARIO_3_SHORT" = "셀룰러 (AirPlay)";
+          "QUALITY_FOR_SCENARIO_3" = "AirPlay 사용 중 셀룰러 연결 시 기본 화질";
+          "QUALITY_FOR_SCENARIO_4_SHORT" = "저전력 모드";
+          "QUALITY_FOR_SCENARIO_4" = "저전력 모드 활성화 시 기본 화질";
           KOEOF
+
+              
+              # 파일 끝에 확실하게 빈 줄을 추가하여 iOS 인식률을 높입니다.
+              echo "" >> "$YCQ_BUNDLE/ko.lproj/Localizable.strings"
+              echo "✅ 한국어 로컬라이제이션 파일이 생성되었습니다."
+              # --- [여기까지] ---
             fi
           fi
 
