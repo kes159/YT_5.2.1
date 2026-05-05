@@ -245,6 +245,8 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
           # ── 2단계: 캐시 확인 + 클론 병렬 예약 ─────────────────────────
+          HEADER_ONLY="YouTubeHeader PSHeader YouGroupSettings YTVideoOverlay"
+
           for repo in "${REPOS[@]}"; do
             NAME="${repo%%|*}"; rest="${repo#*|}"
             URL="${rest%%|*}";  ENABLED="${rest#*|}"
@@ -255,18 +257,36 @@ jobs:
             fi
 
             LATEST_SHA=$(cat "$SHA_STORE/${NAME}.sha" 2>/dev/null || echo "unknown")
-            CACHED=$(ls "$CACHE_DIR/${NAME}_${LATEST_SHA}.deb" 2>/dev/null || true)
 
-            if [[ -n "$CACHED" && "$LATEST_SHA" != "unknown" ]]; then
-              echo "  ✅ $NAME — 캐시 히트 (${LATEST_SHA})"
-              cp "$CACHED" "$READY_DIR/"
+            if echo "$HEADER_ONLY" | grep -qw "$NAME"; then
+              # 헤더 레포: .tar로 캐시 (deb 없음)
+              CACHED_TAR=$(ls "$CACHE_DIR/${NAME}_${LATEST_SHA}.tar" 2>/dev/null || true)
+              if [[ -n "$CACHED_TAR" && "$LATEST_SHA" != "unknown" ]]; then
+                echo "  ✅ $NAME — 헤더 캐시 히트 (${LATEST_SHA})"
+                mkdir -p "$BUILD_DIR/$NAME"
+                tar -xf "$CACHED_TAR" -C "$BUILD_DIR/$NAME"
+              else
+                [[ "$LATEST_SHA" == "unknown" ]] \
+                  && echo "  ⚠️  $NAME — SHA 조회 실패, 클론 예약" \
+                  || echo "  🔄 $NAME — 새 버전 (${LATEST_SHA}), 클론 예약"
+                git clone --quiet --depth=1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
+                CLONE_PIDS+=($!)
+                CLONE_LIST+=("$NAME")
+              fi
             else
-              [[ "$LATEST_SHA" == "unknown" ]] \
-                && echo "  ⚠️  $NAME — SHA 조회 실패, 클론 예약" \
-                || echo "  🔄 $NAME — 새 버전 (${LATEST_SHA}), 클론 예약"
-              git clone --quiet --depth=1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
-              CLONE_PIDS+=($!)
-              CLONE_LIST+=("$NAME")
+              # 트윅 레포: .deb로 캐시
+              CACHED=$(ls "$CACHE_DIR/${NAME}_${LATEST_SHA}.deb" 2>/dev/null || true)
+              if [[ -n "$CACHED" && "$LATEST_SHA" != "unknown" ]]; then
+                echo "  ✅ $NAME — 캐시 히트 (${LATEST_SHA})"
+                cp "$CACHED" "$READY_DIR/"
+              else
+                [[ "$LATEST_SHA" == "unknown" ]] \
+                  && echo "  ⚠️  $NAME — SHA 조회 실패, 클론 예약" \
+                  || echo "  🔄 $NAME — 새 버전 (${LATEST_SHA}), 클론 예약"
+                git clone --quiet --depth=1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
+                CLONE_PIDS+=($!)
+                CLONE_LIST+=("$NAME")
+              fi
             fi
           done
 
@@ -313,7 +333,16 @@ jobs:
 
           for NAME in "${CLONE_LIST[@]}"; do
             if echo "$HEADER_ONLY" | grep -qw "$NAME"; then
-              echo "  📎 $NAME — 헤더/의존성 전용, 건너뜀"
+              # 헤더 전용: 빌드 불필요, tar로 캐시 저장
+              DIR="$BUILD_DIR/$NAME"
+              SHA=$(cat "$SHA_STORE/${NAME}.sha" 2>/dev/null || echo "unknown")
+              if [[ -d "$DIR" && "$SHA" != "unknown" ]]; then
+                rm -f "$CACHE_DIR/${NAME}_"*.tar
+                tar -cf "$CACHE_DIR/${NAME}_${SHA}.tar" -C "$DIR" --exclude='.git' .
+                touch "$SHA_STORE/CACHE_UPDATED"
+                echo "  💾 헤더 캐시 저장: ${NAME}_${SHA}.tar"
+              fi
+              echo "  📎 $NAME — 헤더 전용, 빌드 건너뜀"
               continue
             fi
 
@@ -409,8 +438,7 @@ jobs:
             -o "${{ steps.meta.outputs.ipa_name }}" \
             -f $DEBS \
             -n "${{ github.event.inputs.app_name }}" \
-            -b "${{ github.event.inputs.bundle_id }}" \
-            -c 0
+            -b "${{ github.event.inputs.bundle_id }}"
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
