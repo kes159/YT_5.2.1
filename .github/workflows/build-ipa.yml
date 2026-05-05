@@ -70,17 +70,17 @@ jobs:
           python3 -m pipx ensurepath
           python3 -m pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
 
-          PYZULE_PATH=$(python3 -m pipx environment --value PIPX_BIN_DIR 2>/dev/null || echo "$HOME/.local/bin")
-          echo "PYZULE_BIN_DIR=$PYZULE_PATH" >> $GITHUB_ENV
-          echo "$PYZULE_PATH" >> $GITHUB_PATH
-          export PATH="$PYZULE_PATH:$PATH"
+          CYAN_PATH=$(python3 -m pipx environment --value PIPX_BIN_DIR 2>/dev/null || echo "$HOME/.local/bin")
+          echo "CYAN_BIN_DIR=$CYAN_PATH" >> $GITHUB_ENV
+          echo "$CYAN_PATH" >> $GITHUB_PATH
+          export PATH="$CYAN_PATH:$PATH"
 
-          if ! command -v pyzule &>/dev/null; then
-            echo "pyzule 설치 실패! 경로: $PYZULE_PATH"
-            ls -la "$PYZULE_PATH" || true
+          if ! command -v cyan &>/dev/null; then
+            echo "cyan 설치 실패! 경로: $CYAN_PATH"
+            ls -la "$CYAN_PATH" || true
             exit 1
           fi
-          echo "pyzule 설치 확인: $(which pyzule)"
+          echo "cyan 설치 확인: $(which cyan)"
 
       # ── 4. Theos 및 SDK 설정 ──────────────────────────
       - name: Setup Theos
@@ -282,11 +282,11 @@ jobs:
       # ── 8. 인젝션 및 릴리스 ──────────────────────────────────────
       - name: Inject and Release
         run: |
-          PYZULE="$PYZULE_BIN_DIR/pyzule"
+          CYAN="$CYAN_BIN_DIR/cyan"
 
-          if [[ ! -x "$PYZULE" ]]; then
-            echo "pyzule을 찾을 수 없습니다: $PYZULE"
-            ls -la "$PYZULE_BIN_DIR" || true
+          if [[ ! -x "$CYAN" ]]; then
+            echo "cyan을 찾을 수 없습니다: $CYAN"
+            ls -la "$CYAN_BIN_DIR" || true
             exit 1
           fi
 
@@ -296,7 +296,7 @@ jobs:
             exit 1
           fi
 
-          "$PYZULE" \
+          "$CYAN" \
             -i ./youtube.ipa \
             -o "${{ steps.meta.outputs.ipa_name }}" \
             -f $DEBS \
