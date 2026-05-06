@@ -326,21 +326,21 @@ jobs:
             
             if [[ -n "$YCQ_BUNDLE" ]]; then
               mkdir -p "$YCQ_BUNDLE/ko.lproj"
-              cat > "$YCQ_BUNDLE/ko.lproj/Localizable.strings" << 'KOEOF'
-"TWEAK_NAME" = "YouChooseQuality";
-"TWEAK_DESC" = "각 상황별로 지정한 화질과 동일하거나 가장 가까운 화질을 자동으로 선택합니다.";
-"ENABLED" = "활성화";
-"QUALITY_FOR_SCENARIO_0_SHORT" = "Wi-Fi";
-"QUALITY_FOR_SCENARIO_0" = "Wi-Fi 연결 시 기본 화질";
-"QUALITY_FOR_SCENARIO_1_SHORT" = "셀룰러";
-"QUALITY_FOR_SCENARIO_1" = "셀룰러(모바일 데이터) 연결 시 기본 화질";
-"QUALITY_FOR_SCENARIO_2_SHORT" = "Wi-Fi (AirPlay)";
-"QUALITY_FOR_SCENARIO_2" = "AirPlay 사용 중 Wi-Fi 연결 시 기본 화질";
-"QUALITY_FOR_SCENARIO_3_SHORT" = "셀룰러 (AirPlay)";
-"QUALITY_FOR_SCENARIO_3" = "AirPlay 사용 중 셀룰러 연결 시 기본 화질";
-"QUALITY_FOR_SCENARIO_4_SHORT" = "저전력 모드";
-"QUALITY_FOR_SCENARIO_4" = "저전력 모드 활성화 시 기본 화질";
-KOEOF
+              {
+                printf '"TWEAK_NAME" = "YouChooseQuality";\n'
+                printf '"TWEAK_DESC" = "각 상황별로 지정한 화질과 동일하거나 가장 가까운 화질을 자동으로 선택합니다.";\n'
+                printf '"ENABLED" = "활성화";\n'
+                printf '"QUALITY_FOR_SCENARIO_0_SHORT" = "Wi-Fi";\n'
+                printf '"QUALITY_FOR_SCENARIO_0" = "Wi-Fi 연결 시 기본 화질";\n'
+                printf '"QUALITY_FOR_SCENARIO_1_SHORT" = "셀룰러";\n'
+                printf '"QUALITY_FOR_SCENARIO_1" = "셀룰러(모바일 데이터) 연결 시 기본 화질";\n'
+                printf '"QUALITY_FOR_SCENARIO_2_SHORT" = "Wi-Fi (AirPlay)";\n'
+                printf '"QUALITY_FOR_SCENARIO_2" = "AirPlay 사용 중 Wi-Fi 연결 시 기본 화질";\n'
+                printf '"QUALITY_FOR_SCENARIO_3_SHORT" = "셀룰러 (AirPlay)";\n'
+                printf '"QUALITY_FOR_SCENARIO_3" = "AirPlay 사용 중 셀룰러 연결 시 기본 화질";\n'
+                printf '"QUALITY_FOR_SCENARIO_4_SHORT" = "저전력 모드";\n'
+                printf '"QUALITY_FOR_SCENARIO_4" = "저전력 모드 활성화 시 기본 화질";\n'
+              } > "$YCQ_BUNDLE/ko.lproj/Localizable.strings"
               echo "  ✅ 한국어 로컬라이제이션 파일 생성 완료"
               echo "  📁 위치: $YCQ_BUNDLE/ko.lproj/Localizable.strings"
               echo "  🎯 이 상태로 빌드되어 캐시에 저장됩니다!"
