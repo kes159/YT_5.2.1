@@ -197,59 +197,44 @@ jobs:
             "DontEatMyContent|https://github.com/therealFoxster/DontEatMyContent.git|${{ github.event.inputs.enable_demc }}"
             "YouPiP|https://github.com/PoomSmart/YouPiP.git|${{ github.event.inputs.enable_youpip }}"
             "YouQuality|https://github.com/PoomSmart/YouQuality.git|${{ github.event.inputs.enable_yq }}"
-            "Return-YouTube-Dislikes|https://github.com/PoomSmart/Return-YouTube-Dislikes.git|${{ github.event.inputs.enable_ryd }}"
-            "YTABConfig|https://github.com/PoomSmart/YTABConfig.git|${{ github.event.inputs.enable_ytabc }}"
-            "YouLoop|https://github.com/bhackel/YouLoop.git|${{ github.event.inputs.enable_youloop }}"
-            "YouSpeed|https://github.com/PoomSmart/YouSpeed.git|${{ github.event.inputs.enable_youspeed }}"
             "YouChooseQuality|https://github.com/PoomSmart/YouChooseQuality.git|${{ github.event.inputs.enable_ycq }}"
+            "Return-YouTube-Dislikes|https://github.com/Bloeckchengrafik/Return-YouTube-Dislikes-iOS.git|${{ github.event.inputs.enable_ryd }}"
+            "YTABConfig|https://github.com/PoomSmart/YTABConfig.git|${{ github.event.inputs.enable_ytabc }}"
             "YTUHD|https://github.com/PoomSmart/YTUHD.git|${{ github.event.inputs.enable_ytuhd }}"
+            "YouLoop|https://github.com/PoomSmart/YouLoop.git|${{ github.event.inputs.enable_youloop }}"
+            "YouSpeed|https://github.com/PoomSmart/YouSpeed.git|${{ github.event.inputs.enable_youspeed }}"
           )
 
+          BUILD_DIR="${{ github.workspace }}/tweaks-build"
           CACHE_DIR="${{ github.workspace }}/tweaks"
-          BUILD_DIR="${{ github.workspace }}/tweaks_src"
           READY_DIR="${{ github.workspace }}/ready_packages"
-          SHA_STORE=$(mktemp -d)
-          mkdir -p "$CACHE_DIR" "$BUILD_DIR" "$READY_DIR"
+          SHA_STORE="${{ github.workspace }}/.tweak-shas"
 
+          mkdir -p "$BUILD_DIR" "$READY_DIR" "$SHA_STORE"
           CACHE_UPDATED=false
-          CLONE_PIDS=()
-          CLONE_LIST=()
-          SHA_PIDS=()
 
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  SHA 조회 (병렬)"
+          echo "  캐시 확인 및 트윅 빌드"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # ── 1단계: SHA 조회 전부 병렬 ─────────────────────────────────
-          for repo in "${REPOS[@]}"; do
-            NAME="${repo%%|*}"; rest="${repo#*|}"
-            URL="${rest%%|*}";  ENABLED="${rest#*|}"
-            [[ "$ENABLED" != "true" ]] && continue
+          # 1단계: SHA 업데이트
+          for REPO_INFO in "${REPOS[@]}"; do
+            NAME=$(echo "$REPO_INFO" | cut -d'|' -f1)
+            URL=$(echo "$REPO_INFO" | cut -d'|' -f2)
 
-            REPO_PATH=$(echo "$URL" | sed 's|https://github.com/||;s|\.git$||')
-            (
-              SHA=$(curl -sf \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                "https://api.github.com/repos/$REPO_PATH/commits?per_page=1" \
-                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['sha'][:8])" 2>/dev/null \
-                || echo "unknown")
-              echo "$SHA" > "$SHA_STORE/${NAME}.sha"
-            ) &
-            SHA_PIDS+=($!)
+            LATEST_SHA=$(git ls-remote --heads "$URL" | grep "refs/heads/master\|refs/heads/main" | head -1 | awk '{print $1}' 2>/dev/null || echo "unknown")
+            echo "$LATEST_SHA" > "$SHA_STORE/${NAME}.sha"
           done
 
-          for pid in "${SHA_PIDS[@]}"; do wait "$pid" || true; done
-
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  캐시 확인 + 클론 예약"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-          # ── 2단계: 캐시 확인 + 클론 병렬 예약 ─────────────────────────
+          # 2단계: 캐시 확인 및 클론 스케줄링
+          CLONE_PIDS=()
+          CLONE_LIST=()
           HEADER_ONLY="YouTubeHeader PSHeader YouGroupSettings YTVideoOverlay"
 
-          for repo in "${REPOS[@]}"; do
-            NAME="${repo%%|*}"; rest="${repo#*|}"
-            URL="${rest%%|*}";  ENABLED="${rest#*|}"
+          for REPO_INFO in "${REPOS[@]}"; do
+            NAME=$(echo "$REPO_INFO" | cut -d'|' -f1)
+            URL=$(echo "$REPO_INFO" | cut -d'|' -f2)
+            ENABLED=$(echo "$REPO_INFO" | cut -d'|' -f3)
 
             if [[ "$ENABLED" != "true" ]]; then
               echo "  ⏭  $NAME — 비활성화"
@@ -417,131 +402,33 @@ jobs:
           git commit -m "chore: 트윅 캐시 업데이트 [skip ci]"
           git push
 
-      # ── 7.5. YTLite 의존성 분석 + 누락 dylib 스텁 자동 생성 ──────
-      # YTLite.dylib가 @rpath/lib*.dylib 형태로 jailbreak 전용 라이브러리들을
-      # 참조하는데, 사이드로드 IPA엔 이것들이 없어서 dyld가 abort() → SIGABRT.
-      # otool -L 로 실제 의존성을 전부 파악한 뒤, 시스템 라이브러리가 아닌
-      # jailbreak 전용 라이브러리들에 대해 스텁 dylib를 자동 컴파일해서 주입.
-      - name: Analyze YTLite deps and build missing stubs
+      # ── 8. 인젝션 및 릴리스 ────────────────────────────────────────
+      # ✅ BUG FIX #1: ls 명령을 find로 교체 (pipefail 방지)
+      # ✅ BUG FIX #2: CydiaSubstrate 절대경로 필터링 추가
+      - name: Inject and Release
         shell: bash
         run: |
           set -e
 
-          # ── YTLite deb 추출 ───────────────────────────────────────
-          YTLITE_DEB=$(ls ${{ github.workspace }}/tweaks/com.dvntm.ytlite_*.deb 2>/dev/null | head -1)
-          if [[ -z "$YTLITE_DEB" ]]; then
-            echo "❌ YTLite deb를 찾을 수 없습니다"
+          CYAN="$CYAN_BIN_DIR/cyan"
+          if [[ ! -x "$CYAN" ]]; then
+            echo "❌ cyan을 찾을 수 없습니다: $CYAN"
+            ls -la "$CYAN_BIN_DIR" || true
             exit 1
           fi
 
-          YTLITE_EXTRACT=$(mktemp -d)
-          cd "$YTLITE_EXTRACT"
-          ar x "$YTLITE_DEB"
-          if [[ -f data.tar.xz ]];   then tar -xf data.tar.xz
-          elif [[ -f data.tar.lzma ]]; then tar -xf data.tar.lzma
-          elif [[ -f data.tar.gz ]];  then tar -xf data.tar.gz
-          fi
-          cd ${{ github.workspace }}
-
-          YTLITE_DYLIB=$(find "$YTLITE_EXTRACT" -name "YTLite.dylib" | head -1)
-          if [[ -z "$YTLITE_DYLIB" ]]; then
-            echo "❌ YTLite.dylib 추출 실패"
-            exit 1
-          fi
-          echo "✅ YTLite.dylib: $YTLITE_DYLIB"
-
-          # ── 의존성 전체 출력 (진단용) ─────────────────────────────
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  YTLite.dylib 의존성 목록 (otool -L)"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          otool -L "$YTLITE_DYLIB"
-          echo ""
-
-          # ── @rpath 의존성 중 jailbreak 전용 라이브러리 필터링 ────
-          # 시스템/Swift 라이브러리는 제외, @rpath/lib*.dylib 만 추출
+          # ── 환경 변수 설정
           STUB_DIR="${{ github.workspace }}/stubs"
-          mkdir -p "$STUB_DIR"
+          YTLITE_EXTRACT="${YTLITE_EXTRACT:-/var/folders/tb/y368xp_x10s3ty1b_mtl5mxr0000gn/T/tmp.Ss1G8BqUjz}"
+          READY_DIR="${{ github.workspace }}/ready_packages"
 
-          # 스킵할 패턴: 이미 iOS 시스템이나 Swift 런타임이 제공하는 것들
-          SKIP_PATTERN="libswift|libc++|libSystem|libz\.|libobjc|CoreFoundation|Foundation|UIKit|CydiaSubstrate|libsubstitute|libhooker|ElleKit|substrate"
+          mkdir -p "$STUB_DIR" "$READY_DIR"
 
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  누락 스텁 생성"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          while IFS= read -r dep; do
-            # @rpath/ 형태만 처리
-            [[ "$dep" != *"@rpath/"* ]] && continue
-
-            LIBNAME=$(echo "$dep" | sed 's|.*@rpath/||' | awk '{print $1}')
-            [[ -z "$LIBNAME" ]] && continue
-
-            # 시스템 라이브러리 스킵
-            if echo "$LIBNAME" | grep -qE "$SKIP_PATTERN"; then
-              echo "  ⏭  $LIBNAME — 시스템/훅 라이브러리, 스킵"
-              continue
-            fi
-
-            STUB_OUT="$STUB_DIR/$LIBNAME"
-            echo "  🔨 스텁 생성: $LIBNAME"
-
-            # 해당 라이브러리가 export하는 심볼 목록을 nm으로 추출 시도
-            # 실패하면 빈 스텁만 생성
-            NM_SYMBOLS=$(nm -gU "$YTLITE_DYLIB" 2>/dev/null \
-              | grep -v " U " | awk '{print $3}' \
-              | grep -v "^$" || true)
-
-            # libroot 전용 심볼 정의
-            EXTRA_SYMS=""
-            if [[ "$LIBNAME" == "libroot.dylib" ]]; then
-              EXTRA_SYMS='
-                __attribute__((visibility("default"))) char* rootfs(const char* p) { if(!p) return 0; char* r=malloc(strlen(p)+1); if(r) strcpy(r,p); return r; }
-                __attribute__((visibility("default"))) char* jbroot(const char* p) { if(!p) return 0; char* r=malloc(strlen(p)+1); if(r) strcpy(r,p); return r; }
-                __attribute__((visibility("default"))) char* jbroot_prefix(const char* p) { if(!p) return 0; char* r=malloc(strlen(p)+1); if(r) strcpy(r,p); return r; }
-                __attribute__((visibility("default"))) char* rootfs_prefix(const char* p) { if(!p) return 0; char* r=malloc(strlen(p)+1); if(r) strcpy(r,p); return r; }
-                __attribute__((visibility("default"))) int is_jailbroken(void) { return 0; }
-              '
-            fi
-
-            cat > /tmp/stub_${LIBNAME%.dylib}.c << STUBEOF
-          #include <stdlib.h>
-          #include <string.h>
-          $EXTRA_SYMS
-          STUBEOF
-
-            xcrun -sdk iphoneos clang \
-              -arch arm64 \
-              -dynamiclib \
-              -miphoneos-version-min=14.0 \
-              -install_name "@rpath/$LIBNAME" \
-              -o "$STUB_OUT" \
-              /tmp/stub_${LIBNAME%.dylib}.c \
-              2>/dev/null && echo "  ✅ $LIBNAME 스텁 완료 ($(ls -lh "$STUB_OUT" | awk '{print $5}'))" \
-                          || echo "  ⚠️  $LIBNAME 스텁 컴파일 실패"
-
-          done < <(otool -L "$YTLITE_DYLIB" 2>/dev/null)
-
-          echo ""
-          echo "생성된 스텁 목록:"
-          ls -lh "$STUB_DIR/" || echo "  (없음)"
-
-          # 경로를 다음 step에서 쓸 수 있게 env에 저장
-          echo "YTLITE_EXTRACT=$YTLITE_EXTRACT" >> $GITHUB_ENV
-          echo "STUB_DIR=$STUB_DIR"              >> $GITHUB_ENV
-
-      # ── 8. 인젝션 및 릴리스 ──────────────────────────────────────
-      - name: Inject and Release
-        shell: bash
-        run: |
-          CYAN="$CYAN_BIN_DIR/cyan"
-          if [[ ! -x "$CYAN" ]]; then
-            echo "cyan을 찾을 수 없습니다: $CYAN"
-            ls -la "$CYAN_BIN_DIR" || true
-            exit 1
-          fi
-
-          # YTLite.dylib / YTLite.bundle 위치 (이전 step에서 추출 완료)
+          # ── YTLite.dylib / YTLite.bundle 위치 (이전 step에서 추출 완료)
           YTLITE_DYLIB=$(find "$YTLITE_EXTRACT" -name "YTLite.dylib" | head -1)
           YTLITE_BUNDLE=$(find "$YTLITE_EXTRACT" -name "YTLite.bundle" -type d | head -1)
 
@@ -553,7 +440,7 @@ jobs:
             exit 1
           fi
 
-          # 공백 경로 문제 방지: bundle을 안전한 경로로 복사
+          # ── 공백 경로 문제 방지: bundle을 안전한 경로로 복사
           YTLITE_BUNDLE_SAFE=""
           if [[ -n "$YTLITE_BUNDLE" ]]; then
             YTLITE_BUNDLE_SAFE="$(mktemp -d)/YTLite.bundle"
@@ -561,32 +448,100 @@ jobs:
             echo "✅ YTLite.bundle (safe path): $YTLITE_BUNDLE_SAFE"
           fi
 
-          # 스텁 dylib 목록 (있으면 전부 주입)
-          STUBS=$(ls "$STUB_DIR"/*.dylib 2>/dev/null | tr '\n' ' ')
+          # ── 의존성 분석: @rpath 와 CydiaSubstrate 절대경로 모두 필터링
+          echo ""
+          echo "📦 YTLite.dylib 의존성 분석..."
+          otool -L "$YTLITE_DYLIB" | head -15
+
+          echo ""
+          echo "🔍 누락된 의존성 필터링..."
+
+          # BUG FIX #2: CydiaSubstrate 절대경로를 포함한 필터 정규식
+          MISSING_DEPS=$(otool -L "$YTLITE_DYLIB" | \
+            grep -E "(@rpath/|/Library/Frameworks/CydiaSubstrate)" | \
+            awk '{print $1}' | \
+            sort -u || true)
+
+          if [[ -n "$MISSING_DEPS" ]]; then
+            echo "  감지된 누락 의존성:"
+            echo "$MISSING_DEPS" | sed 's/^/    /'
+            echo ""
+
+            # ── 각 누락된 의존성마다 스텁 생성
+            while IFS= read -r DEP; do
+              [[ -z "$DEP" ]] && continue
+
+              # @rpath 의존성 처리
+              if [[ "$DEP" == "@rpath/"* ]]; then
+                DEP_NAME=$(basename "$DEP")
+                STUB_FILE="$STUB_DIR/$DEP_NAME"
+
+                echo "  🏗  스텁 생성: $DEP_NAME"
+                # 최소 dylib 스텁 생성
+                if echo 'extern int __dso_handle;' | gcc -c -o "$STUB_FILE.o" -x c - 2>/dev/null; then
+                  ld -dylib -o "$STUB_FILE" "$STUB_FILE.o" -lSystem 2>/dev/null || \
+                    echo "    ⚠️  스텁 컴파일 실패 (경고, 계속)"
+                  rm -f "$STUB_FILE.o"
+                else
+                  echo "    ⚠️  스텁 생성 실패"
+                fi
+
+              # CydiaSubstrate 절대경로 처리
+              elif [[ "$DEP" == *"CydiaSubstrate"* ]]; then
+                STUB_FILE="$STUB_DIR/CydiaSubstrate.dylib"
+                if [[ ! -f "$STUB_FILE" ]]; then
+                  echo "  🏗  스텁 생성: CydiaSubstrate.dylib"
+                  if echo 'extern int __dso_handle;' | gcc -c -o "$STUB_FILE.o" -x c - 2>/dev/null; then
+                    ld -dylib -o "$STUB_FILE" "$STUB_FILE.o" -lSystem 2>/dev/null || \
+                      echo "    ⚠️  스텁 컴파일 실패 (경고, 계속)"
+                    rm -f "$STUB_FILE.o"
+                  fi
+                fi
+              fi
+            done <<< "$MISSING_DEPS"
+          else
+            echo "  ✅ 모든 의존성 해결됨"
+          fi
+
+          echo ""
+          echo "생성된 스텁 목록:"
+          ls -la "$STUB_DIR"/*.dylib 2>/dev/null || echo "  (없음)"
+
+          # BUG FIX #1: ls 대신 find 사용 (pipefail 안전성)
+          STUBS=$(find "$STUB_DIR" -maxdepth 1 -name "*.dylib" -type f 2>/dev/null | tr '\n' ' ')
+
           if [[ -n "$STUBS" ]]; then
             echo "✅ 주입할 스텁: $STUBS"
           else
             echo "⚠️  생성된 스텁 없음"
           fi
 
-          # 보조 트윅 deb들
-          DEBS=$(ls ${{ github.workspace }}/ready_packages/*.deb 2>/dev/null | tr '\n' ' ')
+          # ── 보조 트윅 deb들
+          DEBS=$(find "$READY_DIR" -maxdepth 1 -name "*.deb" -type f 2>/dev/null | tr '\n' ' ')
           if [[ -z "$DEBS" ]]; then
-            echo "❌ 주입할 보조 트윅 .deb 파일이 없습니다!"
+            echo "❌ 주입할 .deb 파일이 없습니다!"
             exit 1
           fi
 
-          # 주입 순서:
-          # 1) 스텁 dylib들 (의존성 먼저 해소)
-          # 2) YTLite.dylib
-          # 3) YTLite.bundle
-          # 4) 보조 트윅 deb들
+          echo ""
+          echo "✅ 주입할 .deb 파일:"
+          echo "$DEBS" | tr ' ' '\n' | sed 's/^/    /'
+
+          # ── 주입 실행
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Cyan 주입 실행"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
           "$CYAN" \
             -i ./youtube.ipa \
             -o "${{ steps.meta.outputs.ipa_name }}" \
             -f $STUBS "$YTLITE_DYLIB" "$YTLITE_BUNDLE_SAFE" $DEBS \
             -n "${{ github.event.inputs.app_name }}" \
             -b "${{ github.event.inputs.bundle_id }}"
+
+          echo ""
+          echo "✅ IPA 빌드 완료: ${{ steps.meta.outputs.ipa_name }}"
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
