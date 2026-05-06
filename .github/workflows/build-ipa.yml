@@ -359,6 +359,7 @@ jobs:
             else
               echo "  YouChooseQuality bundle을 찾을 수 없습니다"
             fi
+          fi
 
           # ── 6단계: 병렬 빌드 ────────────────────────────────────────
           echo ""
