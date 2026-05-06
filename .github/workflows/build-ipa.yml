@@ -417,56 +417,118 @@ jobs:
           git commit -m "chore: 트윅 캐시 업데이트 [skip ci]"
           git push
 
-      # ── 7.5. libroot.dylib 스텁 컴파일 ───────────────────────────
-      # YTLite.dylib가 @rpath/libroot.dylib에 의존하는데,
-      # 사이드로드 IPA엔 해당 파일이 없어 dyld가 abort() → SIGABRT(6) 크래시 발생.
-      # Feather(TrollStore)에선 libroot.dylib가 시스템에 존재해서 정상 동작하지만
-      # 순수 사이드로드 환경에선 없으므로, 스텁 dylib를 직접 컴파일해서 주입.
-      - name: Build libroot stub dylib
+      # ── 7.5. YTLite 의존성 분석 + 누락 dylib 스텁 자동 생성 ──────
+      # YTLite.dylib가 @rpath/lib*.dylib 형태로 jailbreak 전용 라이브러리들을
+      # 참조하는데, 사이드로드 IPA엔 이것들이 없어서 dyld가 abort() → SIGABRT.
+      # otool -L 로 실제 의존성을 전부 파악한 뒤, 시스템 라이브러리가 아닌
+      # jailbreak 전용 라이브러리들에 대해 스텁 dylib를 자동 컴파일해서 주입.
+      - name: Analyze YTLite deps and build missing stubs
         shell: bash
         run: |
-          cat > /tmp/libroot_stub.c << 'EOF'
+          set -e
+
+          # ── YTLite deb 추출 ───────────────────────────────────────
+          YTLITE_DEB=$(ls ${{ github.workspace }}/tweaks/com.dvntm.ytlite_*.deb 2>/dev/null | head -1)
+          if [[ -z "$YTLITE_DEB" ]]; then
+            echo "❌ YTLite deb를 찾을 수 없습니다"
+            exit 1
+          fi
+
+          YTLITE_EXTRACT=$(mktemp -d)
+          cd "$YTLITE_EXTRACT"
+          ar x "$YTLITE_DEB"
+          if [[ -f data.tar.xz ]];   then tar -xf data.tar.xz
+          elif [[ -f data.tar.lzma ]]; then tar -xf data.tar.lzma
+          elif [[ -f data.tar.gz ]];  then tar -xf data.tar.gz
+          fi
+          cd ${{ github.workspace }}
+
+          YTLITE_DYLIB=$(find "$YTLITE_EXTRACT" -name "YTLite.dylib" | head -1)
+          if [[ -z "$YTLITE_DYLIB" ]]; then
+            echo "❌ YTLite.dylib 추출 실패"
+            exit 1
+          fi
+          echo "✅ YTLite.dylib: $YTLITE_DYLIB"
+
+          # ── 의존성 전체 출력 (진단용) ─────────────────────────────
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  YTLite.dylib 의존성 목록 (otool -L)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          otool -L "$YTLITE_DYLIB"
+          echo ""
+
+          # ── @rpath 의존성 중 jailbreak 전용 라이브러리 필터링 ────
+          # 시스템/Swift 라이브러리는 제외, @rpath/lib*.dylib 만 추출
+          STUB_DIR="${{ github.workspace }}/stubs"
+          mkdir -p "$STUB_DIR"
+
+          # 스킵할 패턴: 이미 iOS 시스템이나 Swift 런타임이 제공하는 것들
+          SKIP_PATTERN="libswift|libc++|libSystem|libz\.|libobjc|CoreFoundation|Foundation|UIKit|CydiaSubstrate|libsubstitute|libhooker|ElleKit|substrate"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  누락 스텁 생성"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          while IFS= read -r dep; do
+            # @rpath/ 형태만 처리
+            [[ "$dep" != *"@rpath/"* ]] && continue
+
+            LIBNAME=$(echo "$dep" | sed 's|.*@rpath/||' | awk '{print $1}')
+            [[ -z "$LIBNAME" ]] && continue
+
+            # 시스템 라이브러리 스킵
+            if echo "$LIBNAME" | grep -qE "$SKIP_PATTERN"; then
+              echo "  ⏭  $LIBNAME — 시스템/훅 라이브러리, 스킵"
+              continue
+            fi
+
+            STUB_OUT="$STUB_DIR/$LIBNAME"
+            echo "  🔨 스텁 생성: $LIBNAME"
+
+            # 해당 라이브러리가 export하는 심볼 목록을 nm으로 추출 시도
+            # 실패하면 빈 스텁만 생성
+            NM_SYMBOLS=$(nm -gU "$YTLITE_DYLIB" 2>/dev/null \
+              | grep -v " U " | awk '{print $3}' \
+              | grep -v "^$" || true)
+
+            # libroot 전용 심볼 정의
+            EXTRA_SYMS=""
+            if [[ "$LIBNAME" == "libroot.dylib" ]]; then
+              EXTRA_SYMS='
+                __attribute__((visibility("default"))) char* rootfs(const char* p) { if(!p) return 0; char* r=malloc(strlen(p)+1); if(r) strcpy(r,p); return r; }
+                __attribute__((visibility("default"))) char* jbroot(const char* p) { if(!p) return 0; char* r=malloc(strlen(p)+1); if(r) strcpy(r,p); return r; }
+                __attribute__((visibility("default"))) char* jbroot_prefix(const char* p) { if(!p) return 0; char* r=malloc(strlen(p)+1); if(r) strcpy(r,p); return r; }
+                __attribute__((visibility("default"))) char* rootfs_prefix(const char* p) { if(!p) return 0; char* r=malloc(strlen(p)+1); if(r) strcpy(r,p); return r; }
+                __attribute__((visibility("default"))) int is_jailbroken(void) { return 0; }
+              '
+            fi
+
+            cat > /tmp/stub_${LIBNAME%.dylib}.c << STUBEOF
           #include <stdlib.h>
           #include <string.h>
+          $EXTRA_SYMS
+          STUBEOF
 
-          // 사이드로드 환경: 경로를 그대로 반환 (jailbreak 경로 변환 불필요)
-          __attribute__((visibility("default")))
-          char* rootfs(const char* path) {
-            if (!path) return NULL;
-            char* r = malloc(strlen(path) + 1);
-            if (r) strcpy(r, path);
-            return r;
-          }
+            xcrun -sdk iphoneos clang \
+              -arch arm64 \
+              -dynamiclib \
+              -miphoneos-version-min=14.0 \
+              -install_name "@rpath/$LIBNAME" \
+              -o "$STUB_OUT" \
+              /tmp/stub_${LIBNAME%.dylib}.c \
+              2>/dev/null && echo "  ✅ $LIBNAME 스텁 완료 ($(ls -lh "$STUB_OUT" | awk '{print $5}'))" \
+                          || echo "  ⚠️  $LIBNAME 스텁 컴파일 실패"
 
-          __attribute__((visibility("default")))
-          char* jbroot(const char* path) {
-            if (!path) return NULL;
-            char* r = malloc(strlen(path) + 1);
-            if (r) strcpy(r, path);
-            return r;
-          }
+          done < <(otool -L "$YTLITE_DYLIB" 2>/dev/null)
 
-          __attribute__((visibility("default")))
-          char* jbroot_prefix(const char* path) {
-            if (!path) return NULL;
-            char* r = malloc(strlen(path) + 1);
-            if (r) strcpy(r, path);
-            return r;
-          }
+          echo ""
+          echo "생성된 스텁 목록:"
+          ls -lh "$STUB_DIR/" || echo "  (없음)"
 
-          __attribute__((visibility("default")))
-          int is_jailbroken(void) { return 0; }
-          EOF
-
-          xcrun -sdk iphoneos clang \
-            -arch arm64 \
-            -dynamiclib \
-            -miphoneos-version-min=14.0 \
-            -install_name @rpath/libroot.dylib \
-            -o ${{ github.workspace }}/libroot.dylib \
-            /tmp/libroot_stub.c
-
-          echo "✅ libroot.dylib 빌드 완료: $(ls -lh ${{ github.workspace }}/libroot.dylib | awk '{print $5}')"
+          # 경로를 다음 step에서 쓸 수 있게 env에 저장
+          echo "YTLITE_EXTRACT=$YTLITE_EXTRACT" >> $GITHUB_ENV
+          echo "STUB_DIR=$STUB_DIR"              >> $GITHUB_ENV
 
       # ── 8. 인젝션 및 릴리스 ──────────────────────────────────────
       - name: Inject and Release
@@ -479,26 +541,7 @@ jobs:
             exit 1
           fi
 
-          # YTLite deb에서 dylib + bundle 추출
-          # cyan은 deb에서 dylib만 꺼내고 YTLite.bundle은 무시하기 때문에
-          # bundle을 별도로 추출해서 함께 주입해야 앱이 리소스를 찾을 수 있음
-          YTLITE_DEB=$(ls ${{ github.workspace }}/tweaks/com.dvntm.ytlite_*.deb 2>/dev/null | head -1)
-          if [[ -z "$YTLITE_DEB" ]]; then
-            echo "❌ YTLite deb를 찾을 수 없습니다 (tweaks/ 폴더 확인)"
-            exit 1
-          fi
-
-          YTLITE_EXTRACT=$(mktemp -d)
-          cd "$YTLITE_EXTRACT"
-          ar x "$YTLITE_DEB"
-          # xz, lzma 모두 지원
-          if [[ -f data.tar.xz ]]; then
-            tar -xf data.tar.xz
-          elif [[ -f data.tar.lzma ]]; then
-            tar -xf data.tar.lzma
-          fi
-          cd ${{ github.workspace }}
-
+          # YTLite.dylib / YTLite.bundle 위치 (이전 step에서 추출 완료)
           YTLITE_DYLIB=$(find "$YTLITE_EXTRACT" -name "YTLite.dylib" | head -1)
           YTLITE_BUNDLE=$(find "$YTLITE_EXTRACT" -name "YTLite.bundle" -type d | head -1)
 
@@ -506,26 +549,25 @@ jobs:
           echo "✅ YTLite.bundle: $YTLITE_BUNDLE"
 
           if [[ -z "$YTLITE_DYLIB" ]]; then
-            echo "❌ YTLite.dylib 추출 실패"
+            echo "❌ YTLite.dylib를 찾을 수 없습니다"
             exit 1
           fi
 
-          # "Application Support" 경로에 공백이 있어서 shell이 인자를 쪼갬
-          # → 공백 없는 임시 경로로 복사해서 전달
+          # 공백 경로 문제 방지: bundle을 안전한 경로로 복사
           YTLITE_BUNDLE_SAFE=""
           if [[ -n "$YTLITE_BUNDLE" ]]; then
             YTLITE_BUNDLE_SAFE="$(mktemp -d)/YTLite.bundle"
             cp -R "$YTLITE_BUNDLE" "$YTLITE_BUNDLE_SAFE"
-            echo "✅ YTLite.bundle (safe): $YTLITE_BUNDLE_SAFE"
+            echo "✅ YTLite.bundle (safe path): $YTLITE_BUNDLE_SAFE"
           fi
 
-          # libroot.dylib 스텁 확인
-          LIBROOT_DYLIB="${{ github.workspace }}/libroot.dylib"
-          if [[ ! -f "$LIBROOT_DYLIB" ]]; then
-            echo "❌ libroot.dylib 스텁을 찾을 수 없습니다"
-            exit 1
+          # 스텁 dylib 목록 (있으면 전부 주입)
+          STUBS=$(ls "$STUB_DIR"/*.dylib 2>/dev/null | tr '\n' ' ')
+          if [[ -n "$STUBS" ]]; then
+            echo "✅ 주입할 스텁: $STUBS"
+          else
+            echo "⚠️  생성된 스텁 없음"
           fi
-          echo "✅ libroot.dylib 스텁: $(ls -lh $LIBROOT_DYLIB | awk '{print $5}')"
 
           # 보조 트윅 deb들
           DEBS=$(ls ${{ github.workspace }}/ready_packages/*.deb 2>/dev/null | tr '\n' ' ')
@@ -534,12 +576,15 @@ jobs:
             exit 1
           fi
 
-          # YTLite.dylib + YTLite.bundle + libroot 스텁 + 보조 트윅 순서로 주입
-          # libroot.dylib를 먼저 주입해야 YTLite.dylib 로드 시 의존성이 해소됨
+          # 주입 순서:
+          # 1) 스텁 dylib들 (의존성 먼저 해소)
+          # 2) YTLite.dylib
+          # 3) YTLite.bundle
+          # 4) 보조 트윅 deb들
           "$CYAN" \
             -i ./youtube.ipa \
             -o "${{ steps.meta.outputs.ipa_name }}" \
-            -f "$YTLITE_DYLIB" "$YTLITE_BUNDLE_SAFE" "$LIBROOT_DYLIB" $DEBS \
+            -f $STUBS "$YTLITE_DYLIB" "$YTLITE_BUNDLE_SAFE" $DEBS \
             -n "${{ github.event.inputs.app_name }}" \
             -b "${{ github.event.inputs.bundle_id }}"
 
