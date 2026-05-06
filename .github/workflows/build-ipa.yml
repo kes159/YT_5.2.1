@@ -417,6 +417,57 @@ jobs:
           git commit -m "chore: 트윅 캐시 업데이트 [skip ci]"
           git push
 
+      # ── 7.5. libroot.dylib 스텁 컴파일 ───────────────────────────
+      # YTLite.dylib가 @rpath/libroot.dylib에 의존하는데,
+      # 사이드로드 IPA엔 해당 파일이 없어 dyld가 abort() → SIGABRT(6) 크래시 발생.
+      # Feather(TrollStore)에선 libroot.dylib가 시스템에 존재해서 정상 동작하지만
+      # 순수 사이드로드 환경에선 없으므로, 스텁 dylib를 직접 컴파일해서 주입.
+      - name: Build libroot stub dylib
+        shell: bash
+        run: |
+          cat > /tmp/libroot_stub.c << 'EOF'
+          #include <stdlib.h>
+          #include <string.h>
+
+          // 사이드로드 환경: 경로를 그대로 반환 (jailbreak 경로 변환 불필요)
+          __attribute__((visibility("default")))
+          char* rootfs(const char* path) {
+            if (!path) return NULL;
+            char* r = malloc(strlen(path) + 1);
+            if (r) strcpy(r, path);
+            return r;
+          }
+
+          __attribute__((visibility("default")))
+          char* jbroot(const char* path) {
+            if (!path) return NULL;
+            char* r = malloc(strlen(path) + 1);
+            if (r) strcpy(r, path);
+            return r;
+          }
+
+          __attribute__((visibility("default")))
+          char* jbroot_prefix(const char* path) {
+            if (!path) return NULL;
+            char* r = malloc(strlen(path) + 1);
+            if (r) strcpy(r, path);
+            return r;
+          }
+
+          __attribute__((visibility("default")))
+          int is_jailbroken(void) { return 0; }
+          EOF
+
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
+            -dynamiclib \
+            -miphoneos-version-min=14.0 \
+            -install_name @rpath/libroot.dylib \
+            -o ${{ github.workspace }}/libroot.dylib \
+            /tmp/libroot_stub.c
+
+          echo "✅ libroot.dylib 빌드 완료: $(ls -lh ${{ github.workspace }}/libroot.dylib | awk '{print $5}')"
+
       # ── 8. 인젝션 및 릴리스 ──────────────────────────────────────
       - name: Inject and Release
         shell: bash
@@ -468,6 +519,14 @@ jobs:
             echo "✅ YTLite.bundle (safe): $YTLITE_BUNDLE_SAFE"
           fi
 
+          # libroot.dylib 스텁 확인
+          LIBROOT_DYLIB="${{ github.workspace }}/libroot.dylib"
+          if [[ ! -f "$LIBROOT_DYLIB" ]]; then
+            echo "❌ libroot.dylib 스텁을 찾을 수 없습니다"
+            exit 1
+          fi
+          echo "✅ libroot.dylib 스텁: $(ls -lh $LIBROOT_DYLIB | awk '{print $5}')"
+
           # 보조 트윅 deb들
           DEBS=$(ls ${{ github.workspace }}/ready_packages/*.deb 2>/dev/null | tr '\n' ' ')
           if [[ -z "$DEBS" ]]; then
@@ -475,11 +534,12 @@ jobs:
             exit 1
           fi
 
-          # YTLite.dylib + YTLite.bundle + 보조 트윅 순서로 주입
+          # YTLite.dylib + YTLite.bundle + libroot 스텁 + 보조 트윅 순서로 주입
+          # libroot.dylib를 먼저 주입해야 YTLite.dylib 로드 시 의존성이 해소됨
           "$CYAN" \
             -i ./youtube.ipa \
             -o "${{ steps.meta.outputs.ipa_name }}" \
-            -f "$YTLITE_DYLIB" "$YTLITE_BUNDLE_SAFE" $DEBS \
+            -f "$YTLITE_DYLIB" "$YTLITE_BUNDLE_SAFE" "$LIBROOT_DYLIB" $DEBS \
             -n "${{ github.event.inputs.app_name }}" \
             -b "${{ github.event.inputs.bundle_id }}"
 
