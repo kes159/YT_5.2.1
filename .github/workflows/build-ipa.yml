@@ -23,6 +23,11 @@ on:
       enable_ycq:      { description: "YouChooseQuality",        default: true, type: boolean }
       enable_ryd:      { description: "Return YouTube Dislikes", default: true, type: boolean }
       enable_ytabc:    { description: "YTABConfig",              default: true, type: boolean }
+      enable_ytabc_reset:
+        description: "YTABConfigReset"
+        required: true
+        default: true
+        type: boolean
       enable_demc:     { description: "DontEatMyContent",        default: true, type: boolean }
       enable_youloop:  { description: "YouLoop",                 default: true, type: boolean }
       enable_youspeed: { description: "YouSpeed",                default: true, type: boolean }
@@ -184,9 +189,15 @@ jobs:
           REPOS=(
             "YouTubeHeader|https://github.com/PoomSmart/YouTubeHeader.git|true"
             "PSHeader|https://github.com/PoomSmart/PSHeader.git|true"
+            "YouGroupSettings|https://github.com/PoomSmart/YouGroupSettings.git|true"
+            "YTVideoOverlay|https://github.com/PoomSmart/YTVideoOverlay.git|true"
             "DontEatMyContent|https://github.com/therealFoxster/DontEatMyContent.git|${{ github.event.inputs.enable_demc }}"
+            "YouPiP|https://github.com/PoomSmart/YouPiP.git|${{ github.event.inputs.enable_youpip }}"
+            "YouQuality|https://github.com/PoomSmart/YouQuality.git|${{ github.event.inputs.enable_yq }}"
+            "YouChooseQuality|https://github.com/PoomSmart/YouChooseQuality.git|${{ github.event.inputs.enable_ycq }}"
             "Return-YouTube-Dislikes|https://github.com/PoomSmart/Return-YouTube-Dislikes.git|${{ github.event.inputs.enable_ryd }}"
             "YouLoop|https://github.com/bhackel/YouLoop.git|${{ github.event.inputs.enable_youloop }}"
+            "YouSpeed|https://github.com/PoomSmart/YouSpeed.git|${{ github.event.inputs.enable_youspeed }}"
           )
 
           CACHE_DIR="${{ github.workspace }}/tweaks"
@@ -246,58 +257,6 @@ jobs:
             fi
           }
 
-          cache_repo_deb_version() {
-            local base_url="$1"
-            local package_id="$2"
-            local wanted_version="$3"
-            local cache_name="$4"
-            local output_name="$5"
-            local packages_file file_url cache_key cached target
-
-            packages_file="$(mktemp)"
-            curl -fsSL --retry 5 "${base_url%/}/Packages" -o "$packages_file"
-            file_url="$(
-              awk -v pkg="$package_id" -v ver="$wanted_version" '
-                BEGIN { RS=""; FS="\n"; selected = "" }
-                {
-                  package_name = architecture = version = filename = ""
-                  for (i = 1; i <= NF; i++) {
-                    if ($i ~ /^Package: /) package_name = substr($i, 10)
-                    if ($i ~ /^Version: /) version = substr($i, 10)
-                    if ($i ~ /^Architecture: /) architecture = substr($i, 15)
-                    if ($i ~ /^Filename: /) filename = substr($i, 11)
-                  }
-                  if (package_name == pkg && version == ver && architecture == "iphoneos-arm") {
-                    selected = filename
-                  }
-                }
-                END { print selected }
-              ' "$packages_file"
-            )"
-            rm -f "$packages_file"
-
-            if [[ -z "$file_url" ]]; then
-              echo "Could not find ${package_id} ${wanted_version} in ${base_url}/Packages"
-              return 1
-            fi
-
-            [[ "$file_url" == http* ]] || file_url="${base_url%/}/${file_url#./}"
-            cache_key="$(printf "%s|%s" "$file_url" "$wanted_version" | shasum -a 256 | awk '{print substr($1, 1, 12)}')"
-            cached="$(find "$CACHE_DIR" -maxdepth 1 -name "${cache_name}_${wanted_version}_repo_${cache_key}.deb" -print -quit 2>/dev/null || true)"
-            target="$READY_DIR/$output_name"
-
-            if [[ -n "$cached" ]]; then
-              echo "  pinned repo cache hit $cache_name $wanted_version ($cache_key)"
-              cp "$cached" "$target"
-            else
-              echo "  pinned repo cache miss $cache_name $wanted_version ($cache_key), downloading"
-              curl -fL --retry 5 "$file_url" -o "$target"
-              rm -f "$CACHE_DIR/${cache_name}_"*_repo_*.deb
-              cp "$target" "$CACHE_DIR/${cache_name}_${wanted_version}_repo_${cache_key}.deb"
-              touch "$SHA_STORE/CACHE_UPDATED"
-            fi
-          }
-
           echo "Copy local patched debs"
           for deb in "$CACHE_DIR"/*.deb; do
             [[ -f "$deb" ]] || continue
@@ -311,40 +270,19 @@ jobs:
           done
 
           if [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]]; then
-            echo "Prepare pinned YouGroupSettings dependency"
-            cache_repo_deb_version "https://repo.chariz.com" "com.ps.yougroupsettings" "1.0.8" "YouGroupSettings" "YouGroupSettings_1.0.8.deb"
-            echo "Prepare official YTVideoOverlay dependency"
-            cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytvideooverlay" "YTVideoOverlay" "YTVideoOverlay_official.deb"
             echo "Prepare official YTUHD deb"
             cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytuhd" "YTUHD" "YTUHD_official.deb"
             echo "Prepare libundirect dependency"
             cache_repo_deb "https://opa334.github.io" "com.opa334.libundirect" "libundirect" "libundirect.deb"
-          else
-            echo "Prepare pinned YouGroupSettings dependency"
-            cache_repo_deb_version "https://repo.chariz.com" "com.ps.yougroupsettings" "1.0.8" "YouGroupSettings" "YouGroupSettings_1.0.8.deb"
-            echo "Prepare official YTVideoOverlay dependency"
-            cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytvideooverlay" "YTVideoOverlay" "YTVideoOverlay_official.deb"
           fi
 
-          if [[ "${{ github.event.inputs.enable_youpip }}" == "true" ]]; then
-            echo "Prepare official YouPiP deb"
-            cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.youpip" "YouPiP" "YouPiP_official.deb"
-          fi
-          if [[ "${{ github.event.inputs.enable_yq }}" == "true" ]]; then
-            echo "Prepare official YouQuality deb"
-            cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.youquality" "YouQuality" "YouQuality_official.deb"
-          fi
-          if [[ "${{ github.event.inputs.enable_ycq }}" == "true" ]]; then
-            echo "Prepare official YouChooseQuality deb"
-            cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.youchoosequality" "YouChooseQuality" "YouChooseQuality_official.deb"
-          fi
           if [[ "${{ github.event.inputs.enable_ytabc }}" == "true" ]]; then
             echo "Prepare official YTABConfig deb"
             cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytabconfig" "YTABConfig" "YTABConfig_official.deb"
-          fi
-          if [[ "${{ github.event.inputs.enable_youspeed }}" == "true" ]]; then
-            echo "Prepare official YouSpeed deb"
-            cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.youspeed" "YouSpeed" "YouSpeed_official.deb"
+            if [[ "${{ github.event.inputs.enable_ytabc_reset }}" == "true" ]]; then
+              echo "Prepare YTABConfigReset deb"
+              cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytabconfigreset" "YTABConfigReset" "YTABConfigReset_official.deb"
+            fi
           fi
 
           echo "Fetch latest SHAs"
@@ -519,7 +457,7 @@ jobs:
           find "${{ github.workspace }}/ready_packages" -name "*.deb" | sort > "$ALL_DEBS_FILE"
 
           DEBS=("")
-          for pattern in "libundirect" "YouGroupSettings" "YTVideoOverlay"; do
+          for pattern in "libundirect" "YouGroupSettings" "YTVideoOverlay" "YTABConfig" "YTABConfigReset"; do
             while IFS= read -r deb; do
               [[ -n "$deb" ]] || continue
               DEBS+=("$deb")
@@ -528,7 +466,7 @@ jobs:
           while IFS= read -r deb; do
             [[ -n "$deb" ]] || continue
             case "$(basename "$deb")" in
-              *libundirect*.deb|*YouGroupSettings*.deb|*YTVideoOverlay*.deb) continue ;;
+              *libundirect*.deb|*YouGroupSettings*.deb|*YTVideoOverlay*.deb|*YTABConfig*.deb|*YTABConfigReset*.deb) continue ;;
             esac
             DEBS+=("$deb")
           done < "$ALL_DEBS_FILE"
