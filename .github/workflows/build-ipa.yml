@@ -447,9 +447,10 @@ jobs:
               [[ "$ENABLED" == "true" ]] || continue
               REPO_PATH="$(echo "$URL" | sed 's|https://github.com/||;s|\.git$||')"
               (
-                if [[ "$NAME" == "YTUHD" && "${{ github.event.inputs.ytuhd_ref }}" != "master" ]]; then
+                YTUHD_REF="${{ github.event.inputs.ytuhd_ref }}"
+                if [[ "$NAME" == "YTUHD" && -n "$YTUHD_REF" && "$YTUHD_REF" != "master" ]]; then
                   SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-                    "https://api.github.com/repos/$REPO_PATH/commits/${{ github.event.inputs.ytuhd_ref }}" \
+                    "https://api.github.com/repos/$REPO_PATH/commits/$YTUHD_REF" \
                     | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'][:8])" 2>/dev/null || echo unknown)"
                 else
                   SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
@@ -494,8 +495,9 @@ jobs:
                   fi
                 else
                   echo "  clone $NAME ($LATEST_SHA)"
-                  if [[ "$NAME" == "YTUHD" && "${{ github.event.inputs.ytuhd_ref }}" != "master" ]]; then
-                    git clone --quiet --depth 1 --branch "${{ github.event.inputs.ytuhd_ref }}" \
+                  YTUHD_REF="${{ github.event.inputs.ytuhd_ref }}"
+                  if [[ "$NAME" == "YTUHD" && -n "$YTUHD_REF" && "$YTUHD_REF" != "master" ]]; then
+                    git clone --quiet --depth 1 --branch "$YTUHD_REF" \
                       --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
                   else
                     git clone --quiet --depth 1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
