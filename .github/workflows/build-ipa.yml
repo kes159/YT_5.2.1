@@ -29,11 +29,6 @@ on:
       # ─────────────────────────────────────────────────────────────────────────
       enable_youpip:      { description: "YouPiP",                  default: true,  type: boolean }
       enable_ytuhd:       { description: "YTUHD",                   default: true,  type: boolean }
-      ytuhd_ref:
-        description: "YTUHD git ref (branch or tag)"
-        required: true
-        default: "master"
-        type: string
       enable_yq:          { description: "YouQuality",              default: true,  type: boolean }
       enable_ycq:         { description: "YouChooseQuality",        default: true,  type: boolean }
       enable_ryd:         { description: "Return YouTube Dislikes", default: true,  type: boolean }
