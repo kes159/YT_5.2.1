@@ -235,9 +235,34 @@ jobs:
           if [[ "${{ github.event.inputs.update_tweaks }}" != "true" ]]; then
             echo "=== STABLE MODE: using pinned .deb files from tweaks/ ==="
 
-            count=0
+            # Deduplicate: for each tweak key keep only the newest file (by mtime).
+            # This prevents the YouGroupSettings x3 problem when tweaks/ has old leftovers.
+            declare -A SELECTED_DEB
+
+            tweak_key() {
+              local f="$1"
+              for k in YouGroupSettings YTVideoOverlay YouPiP YTUHD \
+                        YouQuality YouChooseQuality Return-YouTube-Dislikes \
+                        YTABConfigReset YTABConfig DontEatMyContent \
+                        YouLoop YouSpeed libundirect; do
+                [[ "$f" == *"$k"* ]] && { echo "$k"; return; }
+              done
+              echo "__other__:$f"
+            }
+
             for deb in "$CACHE_DIR"/*.deb; do
               [[ -f "$deb" ]] || continue
+              key="$(tweak_key "$(basename "$deb")")"
+              if [[ -n "${SELECTED_DEB[$key]:-}" ]]; then
+                [[ "$deb" -nt "${SELECTED_DEB[$key]}" ]] && SELECTED_DEB[$key]="$deb"
+              else
+                SELECTED_DEB[$key]="$deb"
+              fi
+            done
+
+            count=0
+            for key in "${!SELECTED_DEB[@]}"; do
+              deb="${SELECTED_DEB[$key]}"
               fname="$(basename "$deb")"
 
               # Skip debs whose feature flag is disabled.
