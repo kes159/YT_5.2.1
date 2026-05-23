@@ -311,6 +311,13 @@ jobs:
               echo "  copied $fname"
               count=$((count + 1))
             done
+            # .appex 파일도 ready_packages로 복사
+            for appex in "$CACHE_DIR"/*.appex; do
+              [[ -f "$appex" ]] || continue
+              cp "$appex" "$READY_DIR/"
+              echo "  copied $(basename "$appex")"
+            done
+
 
             if [[ "$count" -eq 0 ]]; then
               echo "ERROR: No .deb files found in tweaks/."
@@ -716,7 +723,7 @@ jobs:
           fi
 
           ALL_DEBS_FILE="$(mktemp)"
-          find "${{ github.workspace }}/ready_packages" -name "*.deb" | sort > "$ALL_DEBS_FILE"
+          find "${{ github.workspace }}/ready_packages" \( -name "*.deb" -o -name "*.appex" \) | sort > "$ALL_DEBS_FILE"
 
           # Build injection order: priority packages first, then the rest
           DEBS=("")
