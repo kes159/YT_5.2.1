@@ -36,6 +36,7 @@ on:
       enable_demc:        { description: "DontEatMyContent",        default: true,  type: boolean }
       enable_youloop:     { description: "YouLoop",                 default: true,  type: boolean }
       enable_youspeed:    { description: "YouSpeed",                default: true,  type: boolean }
+      enable_opensafari:  { description: "OpenYouTubeSafariExtension", default: true,  type: boolean }
 
 concurrency:
   group: build-ytplus-${{ github.ref }}
@@ -190,6 +191,7 @@ jobs:
           [[ "${{ github.event.inputs.enable_ytuhd }}"    == "true" ]] && TWEAK_LIST="$TWEAK_LIST\nYTUHD"
           [[ "${{ github.event.inputs.enable_youloop }}"  == "true" ]] && TWEAK_LIST="$TWEAK_LIST\nYouLoop"
           [[ "${{ github.event.inputs.enable_youspeed }}" == "true" ]] && TWEAK_LIST="$TWEAK_LIST\nYouSpeed"
+          [[ "${{ github.event.inputs.enable_opensafari }}" == "true" ]] && TWEAK_LIST="$TWEAK_LIST\nOpenYouTubeSafariExtension"
 
           {
             echo "release_notes<<EOF"
@@ -303,18 +305,19 @@ jobs:
               echo "  copied $fname"
               count=$((count + 1))
             done
-            # .appex.zip 압축 해제 후 복사 (GitHub이 .appex를 자동으로 .zip으로 변환)
-            for appex_zip in "$CACHE_DIR"/*.appex.zip; do
-              [[ -f "$appex_zip" ]] || continue
-              unzip -o "$appex_zip" -d "$READY_DIR/"
-              echo "  unzipped $(basename "$appex_zip")"
-            done
-            # .appex 파일 직접 복사
-            for appex in "$CACHE_DIR"/*.appex; do
-              [[ -f "$appex" ]] || continue
-              cp "$appex" "$READY_DIR/"
-              echo "  copied $(basename "$appex")"
-            done
+            # .appex 복사 (enable_opensafari가 true일 때만)
+            if [[ "${{ github.event.inputs.enable_opensafari }}" == "true" ]]; then
+              for appex_zip in "$CACHE_DIR"/*.appex.zip; do
+                [[ -f "$appex_zip" ]] || continue
+                unzip -o "$appex_zip" -d "$READY_DIR/"
+                echo "  unzipped $(basename "$appex_zip")"
+              done
+              for appex in "$CACHE_DIR"/*.appex; do
+                [[ -f "$appex" ]] || continue
+                cp "$appex" "$READY_DIR/"
+                echo "  copied $(basename "$appex")"
+              done
+            fi
 
 
             if [[ "$count" -eq 0 ]]; then
