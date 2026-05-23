@@ -215,25 +215,17 @@ jobs:
       #   • Cache miss → git clone → make package → save to tweaks/
       #   • Commit any new/updated .deb files back to the repo
       # ════════════════════════════════════════════════════════════════════════
-      - name: Prepare Tweaks
+      - name: Prepare Tweaks (Stable Mode)
+        if: github.event.inputs.update_tweaks != 'true'
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
           CACHE_DIR="${{ github.workspace }}/tweaks"
-          BUILD_DIR="${{ github.workspace }}/tweaks-build"
           READY_DIR="${{ github.workspace }}/ready_packages"
-          SHA_STORE="$(mktemp -d)"
-          mkdir -p "$CACHE_DIR" "$BUILD_DIR" "$READY_DIR"
-          CACHE_UPDATED=false
+          mkdir -p "$CACHE_DIR" "$READY_DIR"
 
-          # ──────────────────────────────────────────────────────────────────
-          # STABLE MODE
-          # ──────────────────────────────────────────────────────────────────
-          if [[ "${{ github.event.inputs.update_tweaks }}" != "true" ]]; then
-            echo "=== STABLE MODE: using pinned .deb files from tweaks/ ==="
+          echo "=== STABLE MODE: using pinned .deb files from tweaks/ ==="
 
             # Deduplicate: for each tweak key keep only the newest file (by mtime).
             # Uses a temp dir instead of declare -A to stay compatible with all shells.
@@ -311,7 +303,13 @@ jobs:
               echo "  copied $fname"
               count=$((count + 1))
             done
-            # .appex 파일도 ready_packages로 복사
+            # .appex.zip 압축 해제 후 복사 (GitHub이 .appex를 자동으로 .zip으로 변환)
+            for appex_zip in "$CACHE_DIR"/*.appex.zip; do
+              [[ -f "$appex_zip" ]] || continue
+              unzip -o "$appex_zip" -d "$READY_DIR/"
+              echo "  unzipped $(basename "$appex_zip")"
+            done
+            # .appex 파일 직접 복사
             for appex in "$CACHE_DIR"/*.appex; do
               [[ -f "$appex" ]] || continue
               cp "$appex" "$READY_DIR/"
@@ -327,378 +325,388 @@ jobs:
 
             echo "CACHE_UPDATED=false" >> "$GITHUB_ENV"
 
-          # ──────────────────────────────────────────────────────────────────
-          # UPDATE MODE
-          # ──────────────────────────────────────────────────────────────────
-          else
-            echo "=== UPDATE MODE: checking for tweak updates ==="
+      - name: Prepare Tweaks (Update Mode)
+        if: github.event.inputs.update_tweaks == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
 
-            REPOS=(
-              "YouTubeHeader|https://github.com/PoomSmart/YouTubeHeader.git|true"
-              "PSHeader|https://github.com/PoomSmart/PSHeader.git|true"
-              "YTVideoOverlay|https://github.com/PoomSmart/YTVideoOverlay.git|true"
-              "DontEatMyContent|https://github.com/therealFoxster/DontEatMyContent.git|${{ github.event.inputs.enable_demc }}"
-              "YouPiP|https://github.com/PoomSmart/YouPiP.git|${{ github.event.inputs.enable_youpip }}"
-              "YouQuality|https://github.com/PoomSmart/YouQuality.git|${{ github.event.inputs.enable_yq }}"
-              "YouChooseQuality|https://github.com/PoomSmart/YouChooseQuality.git|${{ github.event.inputs.enable_ycq }}"
-              "Return-YouTube-Dislikes|https://github.com/PoomSmart/Return-YouTube-Dislikes.git|${{ github.event.inputs.enable_ryd }}"
-              "YouLoop|https://github.com/bhackel/YouLoop.git|${{ github.event.inputs.enable_youloop }}"
-              "YouSpeed|https://github.com/PoomSmart/YouSpeed.git|${{ github.event.inputs.enable_youspeed }}"
-              "YTUHD|https://github.com/PoomSmart/YTUHD.git|${{ github.event.inputs.enable_ytuhd }}"
-            )
+          CACHE_DIR="${{ github.workspace }}/tweaks"
+          BUILD_DIR="${{ github.workspace }}/tweaks-build"
+          READY_DIR="${{ github.workspace }}/ready_packages"
+          SHA_STORE="$(mktemp -d)"
+          mkdir -p "$CACHE_DIR" "$BUILD_DIR" "$READY_DIR"
+          CACHE_UPDATED=false
 
-            HEADER_ONLY="YouTubeHeader PSHeader"
+          echo "=== UPDATE MODE: checking for tweak updates ==="
 
-            # ── helper: download latest .deb from a Cydia/APT repo ──────────
-            cache_repo_deb() {
-              local base_url="$1" package_id="$2" cache_name="$3" output_name="$4"
-              local packages_file file_url cache_key cached target
+          REPOS=(
+            "YouTubeHeader|https://github.com/PoomSmart/YouTubeHeader.git|true"
+            "PSHeader|https://github.com/PoomSmart/PSHeader.git|true"
+            "YTVideoOverlay|https://github.com/PoomSmart/YTVideoOverlay.git|true"
+            "DontEatMyContent|https://github.com/therealFoxster/DontEatMyContent.git|${{ github.event.inputs.enable_demc }}"
+            "YouPiP|https://github.com/PoomSmart/YouPiP.git|${{ github.event.inputs.enable_youpip }}"
+            "YouQuality|https://github.com/PoomSmart/YouQuality.git|${{ github.event.inputs.enable_yq }}"
+            "YouChooseQuality|https://github.com/PoomSmart/YouChooseQuality.git|${{ github.event.inputs.enable_ycq }}"
+            "Return-YouTube-Dislikes|https://github.com/PoomSmart/Return-YouTube-Dislikes.git|${{ github.event.inputs.enable_ryd }}"
+            "YouLoop|https://github.com/bhackel/YouLoop.git|${{ github.event.inputs.enable_youloop }}"
+            "YouSpeed|https://github.com/PoomSmart/YouSpeed.git|${{ github.event.inputs.enable_youspeed }}"
+            "YTUHD|https://github.com/PoomSmart/YTUHD.git|${{ github.event.inputs.enable_ytuhd }}"
+          )
 
-              packages_file="$(mktemp)"
-              curl -fsSL --retry 5 "${base_url%/}/Packages" -o "$packages_file"
-              file_url="$(
-                awk -v pkg="$package_id" '
-                  BEGIN { RS=""; FS="\n" }
-                  {
-                    package_name = architecture = filename = ""
-                    for (i = 1; i <= NF; i++) {
-                      if ($i ~ /^Package: /)      package_name = substr($i, 10)
-                      if ($i ~ /^Architecture: /) architecture = substr($i, 15)
-                      if ($i ~ /^Filename: /)     filename     = substr($i, 11)
-                    }
-                    if (package_name == pkg && architecture == "iphoneos-arm") {
-                      print filename; exit
-                    }
+          HEADER_ONLY="YouTubeHeader PSHeader"
+
+          # ── helper: download latest .deb from a Cydia/APT repo ──────────
+          cache_repo_deb() {
+            local base_url="$1" package_id="$2" cache_name="$3" output_name="$4"
+            local packages_file file_url cache_key cached target
+
+            packages_file="$(mktemp)"
+            curl -fsSL --retry 5 "${base_url%/}/Packages" -o "$packages_file"
+            file_url="$(
+              awk -v pkg="$package_id" '
+                BEGIN { RS=""; FS="\n" }
+                {
+                  package_name = architecture = filename = ""
+                  for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^Package: /)      package_name = substr($i, 10)
+                    if ($i ~ /^Architecture: /) architecture = substr($i, 15)
+                    if ($i ~ /^Filename: /)     filename     = substr($i, 11)
                   }
-                ' "$packages_file"
-              )"
-              rm -f "$packages_file"
-
-              if [[ -z "$file_url" ]]; then
-                echo "Could not find ${package_id} in ${base_url}/Packages"; return 1
-              fi
-              [[ "$file_url" == http* ]] || file_url="${base_url%/}/${file_url#./}"
-              cache_key="$(printf "%s" "$file_url" | shasum -a 256 | awk '{print substr($1,1,12)}')"
-              cached="$(find "$CACHE_DIR" -maxdepth 1 -name "${cache_name}_repo_${cache_key}.deb" -print -quit 2>/dev/null || true)"
-              target="$READY_DIR/$output_name"
-
-              if [[ -n "$cached" ]]; then
-                echo "  repo cache hit $cache_name ($cache_key)"
-                cp "$cached" "$target"
-              else
-                echo "  repo changed $cache_name ($cache_key), downloading"
-                curl -fL --retry 5 "$file_url" -o "$target"
-                rm -f "$CACHE_DIR/${cache_name}_repo_"*.deb
-                cp "$target" "$CACHE_DIR/${cache_name}_repo_${cache_key}.deb"
-                touch "$SHA_STORE/CACHE_UPDATED"
-              fi
-            }
-
-            # ── helper: download a pinned version from a Cydia/APT repo ─────
-            cache_repo_deb_version() {
-              local base_url="$1" package_id="$2" wanted_version="$3" cache_name="$4" output_name="$5"
-              local packages_file file_url cache_key cached target
-
-              packages_file="$(mktemp)"
-              curl -fsSL --retry 5 "${base_url%/}/Packages" -o "$packages_file"
-              file_url="$(
-                awk -v pkg="$package_id" -v ver="$wanted_version" '
-                  BEGIN { RS=""; FS="\n"; selected = "" }
-                  {
-                    package_name = architecture = version = filename = ""
-                    for (i = 1; i <= NF; i++) {
-                      if ($i ~ /^Package: /)      package_name = substr($i, 10)
-                      if ($i ~ /^Version: /)      version      = substr($i, 10)
-                      if ($i ~ /^Architecture: /) architecture = substr($i, 15)
-                      if ($i ~ /^Filename: /)     filename     = substr($i, 11)
-                    }
-                    if (package_name == pkg && version == ver && architecture == "iphoneos-arm") {
-                      selected = filename
-                    }
+                  if (package_name == pkg && architecture == "iphoneos-arm") {
+                    print filename; exit
                   }
-                  END { print selected }
-                ' "$packages_file"
-              )"
-              rm -f "$packages_file"
+                }
+              ' "$packages_file"
+            )"
+            rm -f "$packages_file"
 
-              if [[ -z "$file_url" ]]; then
-                echo "Could not find ${package_id} ${wanted_version} in ${base_url}/Packages"; return 1
-              fi
-              [[ "$file_url" == http* ]] || file_url="${base_url%/}/${file_url#./}"
-              cache_key="$(printf "%s|%s" "$file_url" "$wanted_version" | shasum -a 256 | awk '{print substr($1,1,12)}')"
-              cached="$(find "$CACHE_DIR" -maxdepth 1 -name "${cache_name}_${wanted_version}_repo_${cache_key}.deb" -print -quit 2>/dev/null || true)"
-              target="$READY_DIR/$output_name"
-
-              if [[ -n "$cached" ]]; then
-                echo "  pinned repo cache hit $cache_name $wanted_version ($cache_key)"
-                cp "$cached" "$target"
-              else
-                echo "  pinned repo cache miss $cache_name $wanted_version ($cache_key), downloading"
-                curl -fL --retry 5 "$file_url" -o "$target"
-                rm -f "$CACHE_DIR/${cache_name}_"*_repo_*.deb
-                cp "$target" "$CACHE_DIR/${cache_name}_${wanted_version}_repo_${cache_key}.deb"
-                touch "$SHA_STORE/CACHE_UPDATED"
-              fi
-            }
-
-            echo "Copy local patched debs"
-            for deb in "$CACHE_DIR"/*.deb; do
-              [[ -f "$deb" ]] || continue
-              fname="$(basename "$deb" .deb)"
-              sha_part="${fname##*_}"
-              # Skip auto-managed debs (built from source or downloaded from repo)
-              if [[ "$fname" == *_repo_* || "$fname" == *_direct_* \
-                    || "$sha_part" =~ ^[0-9a-fA-F]{8}$  \
-                    || "$sha_part" =~ ^[0-9a-fA-F]{12}$ \
-                    || "$sha_part" =~ ^[0-9a-fA-F]{40}$ ]]; then
-                continue
-              fi
-              # YouGroupSettings is always supplied by cache_repo_deb_version below;
-              # skip any copy here to prevent duplicates.
-              if [[ "$(basename "$deb")" == *YouGroupSettings* ]]; then
-                echo "  skip (managed by repo): $(basename "$deb")"
-                continue
-              fi
-              cp "$deb" "$READY_DIR/"
-              echo "  copied $(basename "$deb")"
-            done
-
-            echo "Prepare pinned YouGroupSettings dependency"
-            cache_repo_deb_version "https://repo.chariz.com" "com.ps.yougroupsettings" \
-              "1.0.7" "YouGroupSettings" "YouGroupSettings_1.0.7.deb"
-
-            if [[ "${{ github.event.inputs.enable_ytabc }}" == "true" ]]; then
-              echo "Prepare official YTABConfig deb"
-              cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytabconfig" \
-                "YTABConfig" "YTABConfig_official.deb"
-              if [[ "${{ github.event.inputs.enable_ytabc_reset }}" == "true" ]]; then
-                echo "Prepare YTABConfigReset deb"
-                cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytabconfigreset" \
-                  "YTABConfigReset" "YTABConfigReset_official.deb"
-              fi
+            if [[ -z "$file_url" ]]; then
+              echo "Could not find ${package_id} in ${base_url}/Packages"; return 1
             fi
+            [[ "$file_url" == http* ]] || file_url="${base_url%/}/${file_url#./}"
+            cache_key="$(printf "%s" "$file_url" | shasum -a 256 | awk '{print substr($1,1,12)}')"
+            cached="$(find "$CACHE_DIR" -maxdepth 1 -name "${cache_name}_repo_${cache_key}.deb" -print -quit 2>/dev/null || true)"
+            target="$READY_DIR/$output_name"
 
-            echo "Fetch latest SHAs"
-            SHA_PIDS=("")
-            for repo in "${REPOS[@]}"; do
-              NAME="${repo%%|*}"; rest="${repo#*|}"; URL="${rest%%|*}"; ENABLED="${rest#*|}"
-              [[ "$ENABLED" == "true" ]] || continue
-              REPO_PATH="$(echo "$URL" | sed 's|https://github.com/||;s|\.git$||')"
-              (
-                YTUHD_REF="${{ github.event.inputs.ytuhd_ref }}"
-                if [[ "$NAME" == "YTUHD" && -n "$YTUHD_REF" && "$YTUHD_REF" != "master" ]]; then
-                  SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-                    "https://api.github.com/repos/$REPO_PATH/commits/$YTUHD_REF" \
-                    | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'][:8])" 2>/dev/null || echo unknown)"
-                else
-                  SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-                    "https://api.github.com/repos/$REPO_PATH/commits?per_page=1" \
-                    | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['sha'][:8])" 2>/dev/null || echo unknown)"
-                fi
-                echo "$SHA" > "$SHA_STORE/${NAME}.sha"
-              ) &
-              SHA_PIDS+=("$!")
-            done
-            for pid in "${SHA_PIDS[@]}"; do [[ -n "$pid" ]] || continue; wait "$pid" || true; done
-
-            echo "Resolve cache and clone misses"
-            CLONE_PIDS=(""); CLONE_LIST=("")
-            for repo in "${REPOS[@]}"; do
-              NAME="${repo%%|*}"; rest="${repo#*|}"; URL="${rest%%|*}"; ENABLED="${rest#*|}"
-              if [[ "$ENABLED" != "true" ]]; then echo "  skip $NAME"; continue; fi
-
-              LATEST_SHA="$(cat "$SHA_STORE/${NAME}.sha" 2>/dev/null || echo unknown)"
-
-              if echo "$HEADER_ONLY" | grep -qw "$NAME"; then
-                CACHED="$(find "$CACHE_DIR" -maxdepth 1 -name "${NAME}_${LATEST_SHA}.tar" -print -quit 2>/dev/null || true)"
-                if [[ -n "$CACHED" && "$LATEST_SHA" != "unknown" ]]; then
-                  echo "  header cache hit $NAME ($LATEST_SHA)"
-                  mkdir -p "$BUILD_DIR/$NAME"
-                  tar -xf "$CACHED" -C "$BUILD_DIR/$NAME"
-                else
-                  echo "  clone header $NAME ($LATEST_SHA)"
-                  git clone --quiet --depth 1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
-                  CLONE_PIDS+=("$!"); CLONE_LIST+=("$NAME")
-                fi
-              else
-                CACHED="$(find "$CACHE_DIR" -maxdepth 1 -name "${NAME}_${LATEST_SHA}.deb" -print -quit 2>/dev/null || true)"
-                if [[ -n "$CACHED" && "$LATEST_SHA" != "unknown" ]]; then
-                  echo "  deb cache hit $NAME ($LATEST_SHA)"
-                  cp "$CACHED" "$READY_DIR/"
-                  # YTVideoOverlay needs its source for header imports even on cache hit
-                  if [[ "$NAME" == "YTVideoOverlay" ]]; then
-                    echo "  clone YTVideoOverlay source for header imports (deb cache hit)"
-                    git clone --quiet --depth 1 "$URL" "$BUILD_DIR/$NAME" &
-                    CLONE_PIDS+=("$!")
-                  fi
-                else
-                  echo "  clone $NAME ($LATEST_SHA)"
-                  YTUHD_REF="${{ github.event.inputs.ytuhd_ref }}"
-                  if [[ "$NAME" == "YTUHD" && -n "$YTUHD_REF" && "$YTUHD_REF" != "master" ]]; then
-                    git clone --quiet --depth 1 --branch "$YTUHD_REF" \
-                      --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
-                  else
-                    git clone --quiet --depth 1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
-                  fi
-                  CLONE_PIDS+=("$!"); CLONE_LIST+=("$NAME")
-                fi
-              fi
-            done
-            for pid in "${CLONE_PIDS[@]}"; do [[ -n "$pid" ]] || continue; wait "$pid" || true; done
-
-            if [[ -d "$BUILD_DIR/YouTubeHeader" ]]; then
-              mkdir -p "$THEOS/include/YouTubeHeader"
-              rsync -a --exclude='.git' "$BUILD_DIR/YouTubeHeader/" "$THEOS/include/YouTubeHeader/"
-              rsync -a --exclude='.git' "$BUILD_DIR/YouTubeHeader/" "$THEOS/include/"
+            if [[ -n "$cached" ]]; then
+              echo "  repo cache hit $cache_name ($cache_key)"
+              cp "$cached" "$target"
+            else
+              echo "  repo changed $cache_name ($cache_key), downloading"
+              curl -fL --retry 5 "$file_url" -o "$target"
+              rm -f "$CACHE_DIR/${cache_name}_repo_"*.deb
+              cp "$target" "$CACHE_DIR/${cache_name}_repo_${cache_key}.deb"
+              touch "$SHA_STORE/CACHE_UPDATED"
             fi
-            if [[ -d "$BUILD_DIR/PSHeader" ]]; then
-              rm -rf "$BUILD_DIR/PSHeader/CoreImage"
-              mkdir -p "$THEOS/include/PSHeader"
-              rsync -a --exclude='.git' "$BUILD_DIR/PSHeader/" "$THEOS/include/PSHeader/"
-              rsync -a --exclude='.git' "$BUILD_DIR/PSHeader/" "$THEOS/include/"
+          }
+
+          # ── helper: download a pinned version from a Cydia/APT repo ─────
+          cache_repo_deb_version() {
+            local base_url="$1" package_id="$2" wanted_version="$3" cache_name="$4" output_name="$5"
+            local packages_file file_url cache_key cached target
+
+            packages_file="$(mktemp)"
+            curl -fsSL --retry 5 "${base_url%/}/Packages" -o "$packages_file"
+            file_url="$(
+              awk -v pkg="$package_id" -v ver="$wanted_version" '
+                BEGIN { RS=""; FS="\n"; selected = "" }
+                {
+                  package_name = architecture = version = filename = ""
+                  for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^Package: /)      package_name = substr($i, 10)
+                    if ($i ~ /^Version: /)      version      = substr($i, 10)
+                    if ($i ~ /^Architecture: /) architecture = substr($i, 15)
+                    if ($i ~ /^Filename: /)     filename     = substr($i, 11)
+                  }
+                  if (package_name == pkg && version == ver && architecture == "iphoneos-arm") {
+                    selected = filename
+                  }
+                }
+                END { print selected }
+              ' "$packages_file"
+            )"
+            rm -f "$packages_file"
+
+            if [[ -z "$file_url" ]]; then
+              echo "Could not find ${package_id} ${wanted_version} in ${base_url}/Packages"; return 1
             fi
+            [[ "$file_url" == http* ]] || file_url="${base_url%/}/${file_url#./}"
+            cache_key="$(printf "%s|%s" "$file_url" "$wanted_version" | shasum -a 256 | awk '{print substr($1,1,12)}')"
+            cached="$(find "$CACHE_DIR" -maxdepth 1 -name "${cache_name}_${wanted_version}_repo_${cache_key}.deb" -print -quit 2>/dev/null || true)"
+            target="$READY_DIR/$output_name"
 
-            if [[ -d "$BUILD_DIR/DontEatMyContent" ]]; then
-              sed -i '' "s/^CGFloat constant;/extern CGFloat constant;/" \
-                "$BUILD_DIR/DontEatMyContent/Tweak.h" 2>/dev/null || true
-              perl -0pi -e 's/#import "Tweak\.h"\n/#import "Tweak.h"\nCGFloat constant = 0;\n/' \
-                "$BUILD_DIR/DontEatMyContent/Tweak.x" 2>/dev/null || true
+            if [[ -n "$cached" ]]; then
+              echo "  pinned repo cache hit $cache_name $wanted_version ($cache_key)"
+              cp "$cached" "$target"
+            else
+              echo "  pinned repo cache miss $cache_name $wanted_version ($cache_key), downloading"
+              curl -fL --retry 5 "$file_url" -o "$target"
+              rm -f "$CACHE_DIR/${cache_name}_"*_repo_*.deb
+              cp "$target" "$CACHE_DIR/${cache_name}_${wanted_version}_repo_${cache_key}.deb"
+              touch "$SHA_STORE/CACHE_UPDATED"
             fi
+          }
 
-            export DEBUG=0 FINALPACKAGE=1 SIDELOAD=1 SDKVERSION=16.5
-            BUILD_PIDS=("")
-            for NAME in "${CLONE_LIST[@]}"; do
-              [[ -n "$NAME" ]] || continue
-              DIR="$BUILD_DIR/$NAME"
-              SHA="$(cat "$SHA_STORE/${NAME}.sha" 2>/dev/null || echo unknown)"
+          echo "Copy local patched debs"
+          for deb in "$CACHE_DIR"/*.deb; do
+            [[ -f "$deb" ]] || continue
+            fname="$(basename "$deb" .deb)"
+            sha_part="${fname##*_}"
+            # Skip auto-managed debs (built from source or downloaded from repo)
+            if [[ "$fname" == *_repo_* || "$fname" == *_direct_* \
+                  || "$sha_part" =~ ^[0-9a-fA-F]{8}$  \
+                  || "$sha_part" =~ ^[0-9a-fA-F]{12}$ \
+                  || "$sha_part" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              continue
+            fi
+            # YouGroupSettings is always supplied by cache_repo_deb_version below;
+            # skip any copy here to prevent duplicates.
+            if [[ "$(basename "$deb")" == *YouGroupSettings* ]]; then
+              echo "  skip (managed by repo): $(basename "$deb")"
+              continue
+            fi
+            cp "$deb" "$READY_DIR/"
+            echo "  copied $(basename "$deb")"
+          done
 
-              if echo "$HEADER_ONLY" | grep -qw "$NAME"; then
-                if [[ -d "$DIR" && "$SHA" != "unknown" ]]; then
-                  rm -f "$CACHE_DIR/${NAME}_"*.tar
-                  tar -cf "$CACHE_DIR/${NAME}_${SHA}.tar" -C "$DIR" --exclude='.git' .
-                  touch "$SHA_STORE/CACHE_UPDATED"
-                fi
-                continue
-              fi
+          echo "Prepare pinned YouGroupSettings dependency"
+          cache_repo_deb_version "https://repo.chariz.com" "com.ps.yougroupsettings" \
+            "1.0.7" "YouGroupSettings" "YouGroupSettings_1.0.7.deb"
 
-              [[ -d "$DIR" ]] || continue
-              (
-                if [[ "$NAME" == "YTUHD" ]]; then
-                  if [[ -d "$DIR/vendor/libvpx" && ! -f "$DIR/vendor/libvpx_ios/libvpx.a" ]]; then
-                    echo "  building YTUHD libvpx..."
-                    pushd "$DIR/vendor/libvpx" >/dev/null
-                    make distclean >/dev/null 2>&1 || true
-                    ./configure --target=arm64-darwin-gcc \
-                      --disable-examples --disable-tools --disable-docs \
-                      --disable-unit-tests --disable-webm-io \
-                      --enable-vp9-decoder --enable-pic > /tmp/build_YTUHD_libvpx.log 2>&1
-                    make -j"$(sysctl -n hw.ncpu)" libvpx.a >> /tmp/build_YTUHD_libvpx.log 2>&1
-                    mkdir -p "$DIR/vendor/libvpx_ios"
-                    cp libvpx.a "$DIR/vendor/libvpx_ios/libvpx.a"
-                    popd >/dev/null
-                  fi
-
-                  if [[ -d "$DIR/vendor/dav1d" && ! -f "$DIR/vendor/dav1d_ios/libdav1d.a" ]]; then
-                    echo "  building YTUHD dav1d..."
-                    SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
-                    CLANG_PATH="$(xcrun --sdk iphoneos --find clang)"
-                    AR_PATH="$(xcrun --sdk iphoneos --find ar)"
-                    STRIP_PATH="$(xcrun --sdk iphoneos --find strip)"
-                    CROSS_FILE="$DIR/vendor/dav1d/ios-arm64-cross.txt"
-                    {
-                      echo "[binaries]"
-                      echo "c = '$CLANG_PATH'"
-                      echo "ar = '$AR_PATH'"
-                      echo "strip = '$STRIP_PATH'"
-                      echo ""
-                      echo "[host_machine]"
-                      echo "system = 'darwin'"
-                      echo "cpu_family = 'aarch64'"
-                      echo "cpu = 'arm64'"
-                      echo "endian = 'little'"
-                      echo ""
-                      echo "[built-in options]"
-                      echo "c_args = ['-arch', 'arm64', '-isysroot', '$SDK_PATH', '-miphoneos-version-min=11.0']"
-                      echo "c_link_args = ['-arch', 'arm64', '-isysroot', '$SDK_PATH', '-miphoneos-version-min=11.0']"
-                    } > "$CROSS_FILE"
-
-                    rm -rf "$DIR/vendor/dav1d/build-ios"
-                    meson setup "$DIR/vendor/dav1d/build-ios" "$DIR/vendor/dav1d" \
-                      --cross-file "$CROSS_FILE" \
-                      --default-library static \
-                      -Denable_tools=false \
-                      -Denable_tests=false \
-                      -Denable_examples=false \
-                      -Denable_docs=false \
-                      -Denable_asm=false > /tmp/build_YTUHD_dav1d.log 2>&1
-                    ninja -C "$DIR/vendor/dav1d/build-ios" >> /tmp/build_YTUHD_dav1d.log 2>&1
-                    mkdir -p "$DIR/vendor/dav1d_ios"
-                    DAV1D_LIB="$(find "$DIR/vendor/dav1d/build-ios" -name "libdav1d.a" -print -quit)"
-                    if [[ -z "$DAV1D_LIB" ]]; then
-                      echo "  dav1d build did not produce libdav1d.a"
-                      tail -80 /tmp/build_YTUHD_dav1d.log || true
-                      exit 1
-                    fi
-                    cp "$DAV1D_LIB" "$DIR/vendor/dav1d_ios/libdav1d.a"
-                  fi
-                fi
-
-                pushd "$DIR" >/dev/null
-                if [[ -f Makefile ]]; then
-                  make clean >/dev/null 2>&1 || true
-                  if make -j"$(sysctl -n hw.ncpu)" package >"/tmp/build_${NAME}.log" 2>&1; then
-                    for deb in packages/*.deb; do
-                      [[ -f "$deb" ]] || continue
-                      cp "$deb" "$READY_DIR/"
-                      if [[ "$SHA" != "unknown" ]]; then
-                        rm -f "$CACHE_DIR/${NAME}_"*.deb
-                        cp "$deb" "$CACHE_DIR/${NAME}_${SHA}.deb"
-                        touch "$SHA_STORE/CACHE_UPDATED"
-                      fi
-                    done
-                    echo "  built $NAME"
-                  else
-                    echo "  build failed $NAME"
-                    tail -40 "/tmp/build_${NAME}.log"
-                    exit 1
-                  fi
-                fi
-                popd >/dev/null
-              ) &
-              BUILD_PIDS+=("$!")
-            done
-            for pid in "${BUILD_PIDS[@]}"; do [[ -n "$pid" ]] || continue; wait "$pid"; done
-
-            [[ -f "$SHA_STORE/CACHE_UPDATED" ]] && CACHE_UPDATED=true
-            echo "CACHE_UPDATED=$CACHE_UPDATED" >> "$GITHUB_ENV"
+          if [[ "${{ github.event.inputs.enable_ytabc }}" == "true" ]]; then
+            echo "Prepare official YTABConfig deb"
+            cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytabconfig" \
+              "YTABConfig" "YTABConfig_official.deb"
+            if [[ "${{ github.event.inputs.enable_ytabc_reset }}" == "true" ]]; then
+              echo "Prepare YTABConfigReset deb"
+              cache_repo_deb "https://poomsmart.github.io/repo" "com.ps.ytabconfigreset" \
+                "YTABConfigReset" "YTABConfigReset_official.deb"
+            fi
           fi
 
-          # ── validation (both modes) ────────────────────────────────────────
+          echo "Fetch latest SHAs"
+          SHA_PIDS=("")
+          for repo in "${REPOS[@]}"; do
+            NAME="${repo%%|*}"; rest="${repo#*|}"; URL="${rest%%|*}"; ENABLED="${rest#*|}"
+            [[ "$ENABLED" == "true" ]] || continue
+            REPO_PATH="$(echo "$URL" | sed 's|https://github.com/||;s|\.git$||')"
+            (
+              YTUHD_REF="${{ github.event.inputs.ytuhd_ref }}"
+              if [[ "$NAME" == "YTUHD" && -n "$YTUHD_REF" && "$YTUHD_REF" != "master" ]]; then
+                SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+                  "https://api.github.com/repos/$REPO_PATH/commits/$YTUHD_REF" \
+                  | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'][:8])" 2>/dev/null || echo unknown)"
+              else
+                SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+                  "https://api.github.com/repos/$REPO_PATH/commits?per_page=1" \
+                  | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['sha'][:8])" 2>/dev/null || echo unknown)"
+              fi
+              echo "$SHA" > "$SHA_STORE/${NAME}.sha"
+            ) &
+            SHA_PIDS+=("$!")
+          done
+          for pid in "${SHA_PIDS[@]}"; do [[ -n "$pid" ]] || continue; wait "$pid" || true; done
+
+          echo "Resolve cache and clone misses"
+          CLONE_PIDS=(""); CLONE_LIST=("")
+          for repo in "${REPOS[@]}"; do
+            NAME="${repo%%|*}"; rest="${repo#*|}"; URL="${rest%%|*}"; ENABLED="${rest#*|}"
+            if [[ "$ENABLED" != "true" ]]; then echo "  skip $NAME"; continue; fi
+
+            LATEST_SHA="$(cat "$SHA_STORE/${NAME}.sha" 2>/dev/null || echo unknown)"
+
+            if echo "$HEADER_ONLY" | grep -qw "$NAME"; then
+              CACHED="$(find "$CACHE_DIR" -maxdepth 1 -name "${NAME}_${LATEST_SHA}.tar" -print -quit 2>/dev/null || true)"
+              if [[ -n "$CACHED" && "$LATEST_SHA" != "unknown" ]]; then
+                echo "  header cache hit $NAME ($LATEST_SHA)"
+                mkdir -p "$BUILD_DIR/$NAME"
+                tar -xf "$CACHED" -C "$BUILD_DIR/$NAME"
+              else
+                echo "  clone header $NAME ($LATEST_SHA)"
+                git clone --quiet --depth 1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
+                CLONE_PIDS+=("$!"); CLONE_LIST+=("$NAME")
+              fi
+            else
+              CACHED="$(find "$CACHE_DIR" -maxdepth 1 -name "${NAME}_${LATEST_SHA}.deb" -print -quit 2>/dev/null || true)"
+              if [[ -n "$CACHED" && "$LATEST_SHA" != "unknown" ]]; then
+                echo "  deb cache hit $NAME ($LATEST_SHA)"
+                cp "$CACHED" "$READY_DIR/"
+                # YTVideoOverlay needs its source for header imports even on cache hit
+                if [[ "$NAME" == "YTVideoOverlay" ]]; then
+                  echo "  clone YTVideoOverlay source for header imports (deb cache hit)"
+                  git clone --quiet --depth 1 "$URL" "$BUILD_DIR/$NAME" &
+                  CLONE_PIDS+=("$!")
+                fi
+              else
+                echo "  clone $NAME ($LATEST_SHA)"
+                YTUHD_REF="${{ github.event.inputs.ytuhd_ref }}"
+                if [[ "$NAME" == "YTUHD" && -n "$YTUHD_REF" && "$YTUHD_REF" != "master" ]]; then
+                  git clone --quiet --depth 1 --branch "$YTUHD_REF" \
+                    --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
+                else
+                  git clone --quiet --depth 1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
+                fi
+                CLONE_PIDS+=("$!"); CLONE_LIST+=("$NAME")
+              fi
+            fi
+          done
+          for pid in "${CLONE_PIDS[@]}"; do [[ -n "$pid" ]] || continue; wait "$pid" || true; done
+
+          if [[ -d "$BUILD_DIR/YouTubeHeader" ]]; then
+            mkdir -p "$THEOS/include/YouTubeHeader"
+            rsync -a --exclude='.git' "$BUILD_DIR/YouTubeHeader/" "$THEOS/include/YouTubeHeader/"
+            rsync -a --exclude='.git' "$BUILD_DIR/YouTubeHeader/" "$THEOS/include/"
+          fi
+          if [[ -d "$BUILD_DIR/PSHeader" ]]; then
+            rm -rf "$BUILD_DIR/PSHeader/CoreImage"
+            mkdir -p "$THEOS/include/PSHeader"
+            rsync -a --exclude='.git' "$BUILD_DIR/PSHeader/" "$THEOS/include/PSHeader/"
+            rsync -a --exclude='.git' "$BUILD_DIR/PSHeader/" "$THEOS/include/"
+          fi
+
+          if [[ -d "$BUILD_DIR/DontEatMyContent" ]]; then
+            sed -i '' "s/^CGFloat constant;/extern CGFloat constant;/" \
+              "$BUILD_DIR/DontEatMyContent/Tweak.h" 2>/dev/null || true
+            perl -0pi -e 's/#import "Tweak\.h"\n/#import "Tweak.h"\nCGFloat constant = 0;\n/' \
+              "$BUILD_DIR/DontEatMyContent/Tweak.x" 2>/dev/null || true
+          fi
+
+          export DEBUG=0 FINALPACKAGE=1 SIDELOAD=1 SDKVERSION=16.5
+          BUILD_PIDS=("")
+          for NAME in "${CLONE_LIST[@]}"; do
+            [[ -n "$NAME" ]] || continue
+            DIR="$BUILD_DIR/$NAME"
+            SHA="$(cat "$SHA_STORE/${NAME}.sha" 2>/dev/null || echo unknown)"
+
+            if echo "$HEADER_ONLY" | grep -qw "$NAME"; then
+              if [[ -d "$DIR" && "$SHA" != "unknown" ]]; then
+                rm -f "$CACHE_DIR/${NAME}_"*.tar
+                tar -cf "$CACHE_DIR/${NAME}_${SHA}.tar" -C "$DIR" --exclude='.git' .
+                touch "$SHA_STORE/CACHE_UPDATED"
+              fi
+              continue
+            fi
+
+            [[ -d "$DIR" ]] || continue
+            (
+              if [[ "$NAME" == "YTUHD" ]]; then
+                if [[ -d "$DIR/vendor/libvpx" && ! -f "$DIR/vendor/libvpx_ios/libvpx.a" ]]; then
+                  echo "  building YTUHD libvpx..."
+                  pushd "$DIR/vendor/libvpx" >/dev/null
+                  make distclean >/dev/null 2>&1 || true
+                  ./configure --target=arm64-darwin-gcc \
+                    --disable-examples --disable-tools --disable-docs \
+                    --disable-unit-tests --disable-webm-io \
+                    --enable-vp9-decoder --enable-pic > /tmp/build_YTUHD_libvpx.log 2>&1
+                  make -j"$(sysctl -n hw.ncpu)" libvpx.a >> /tmp/build_YTUHD_libvpx.log 2>&1
+                  mkdir -p "$DIR/vendor/libvpx_ios"
+                  cp libvpx.a "$DIR/vendor/libvpx_ios/libvpx.a"
+                  popd >/dev/null
+                fi
+
+                if [[ -d "$DIR/vendor/dav1d" && ! -f "$DIR/vendor/dav1d_ios/libdav1d.a" ]]; then
+                  echo "  building YTUHD dav1d..."
+                  SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+                  CLANG_PATH="$(xcrun --sdk iphoneos --find clang)"
+                  AR_PATH="$(xcrun --sdk iphoneos --find ar)"
+                  STRIP_PATH="$(xcrun --sdk iphoneos --find strip)"
+                  CROSS_FILE="$DIR/vendor/dav1d/ios-arm64-cross.txt"
+                  {
+                    echo "[binaries]"
+                    echo "c = '$CLANG_PATH'"
+                    echo "ar = '$AR_PATH'"
+                    echo "strip = '$STRIP_PATH'"
+                    echo ""
+                    echo "[host_machine]"
+                    echo "system = 'darwin'"
+                    echo "cpu_family = 'aarch64'"
+                    echo "cpu = 'arm64'"
+                    echo "endian = 'little'"
+                    echo ""
+                    echo "[built-in options]"
+                    echo "c_args = ['-arch', 'arm64', '-isysroot', '$SDK_PATH', '-miphoneos-version-min=11.0']"
+                    echo "c_link_args = ['-arch', 'arm64', '-isysroot', '$SDK_PATH', '-miphoneos-version-min=11.0']"
+                  } > "$CROSS_FILE"
+
+                  rm -rf "$DIR/vendor/dav1d/build-ios"
+                  meson setup "$DIR/vendor/dav1d/build-ios" "$DIR/vendor/dav1d" \
+                    --cross-file "$CROSS_FILE" \
+                    --default-library static \
+                    -Denable_tools=false \
+                    -Denable_tests=false \
+                    -Denable_examples=false \
+                    -Denable_docs=false \
+                    -Denable_asm=false > /tmp/build_YTUHD_dav1d.log 2>&1
+                  ninja -C "$DIR/vendor/dav1d/build-ios" >> /tmp/build_YTUHD_dav1d.log 2>&1
+                  mkdir -p "$DIR/vendor/dav1d_ios"
+                  DAV1D_LIB="$(find "$DIR/vendor/dav1d/build-ios" -name "libdav1d.a" -print -quit)"
+                  if [[ -z "$DAV1D_LIB" ]]; then
+                    echo "  dav1d build did not produce libdav1d.a"
+                    tail -80 /tmp/build_YTUHD_dav1d.log || true
+                    exit 1
+                  fi
+                  cp "$DAV1D_LIB" "$DIR/vendor/dav1d_ios/libdav1d.a"
+                fi
+              fi
+
+              pushd "$DIR" >/dev/null
+              if [[ -f Makefile ]]; then
+                make clean >/dev/null 2>&1 || true
+                if make -j"$(sysctl -n hw.ncpu)" package >"/tmp/build_${NAME}.log" 2>&1; then
+                  for deb in packages/*.deb; do
+                    [[ -f "$deb" ]] || continue
+                    cp "$deb" "$READY_DIR/"
+                    if [[ "$SHA" != "unknown" ]]; then
+                      rm -f "$CACHE_DIR/${NAME}_"*.deb
+                      cp "$deb" "$CACHE_DIR/${NAME}_${SHA}.deb"
+                      touch "$SHA_STORE/CACHE_UPDATED"
+                    fi
+                  done
+                  echo "  built $NAME"
+                else
+                  echo "  build failed $NAME"
+                  tail -40 "/tmp/build_${NAME}.log"
+                  exit 1
+                fi
+              fi
+              popd >/dev/null
+            ) &
+            BUILD_PIDS+=("$!")
+          done
+          for pid in "${BUILD_PIDS[@]}"; do [[ -n "$pid" ]] || continue; wait "$pid"; done
+
+          [[ -f "$SHA_STORE/CACHE_UPDATED" ]] && CACHE_UPDATED=true
+          echo "CACHE_UPDATED=$CACHE_UPDATED" >> "$GITHUB_ENV"
+
+          # ── validation ────────────────────────────────────────────────────
           echo "Ready debs"
           ls -lh "$READY_DIR/"
           DEB_COUNT="$(find "$READY_DIR" -name "*.deb" | wc -l | tr -d ' ')"
           if [[ "$DEB_COUNT" -eq 0 ]]; then
-            echo "No deb files to inject"; exit 1
+          echo "No deb files to inject"; exit 1
           fi
           YGS_COUNT="$(find "$READY_DIR" -name "*YouGroupSettings*.deb" | wc -l | tr -d ' ')"
           if [[ "$YGS_COUNT" -ne 1 ]]; then
-            echo "Expected exactly one YouGroupSettings deb, found $YGS_COUNT"
-            find "$READY_DIR" -name "*YouGroupSettings*.deb" -print
-            exit 1
+          echo "Expected exactly one YouGroupSettings deb, found $YGS_COUNT"
+          find "$READY_DIR" -name "*YouGroupSettings*.deb" -print
+          exit 1
           fi
           if [[ "${{ github.event.inputs.enable_ytabc_reset }}" != "true" ]]; then
-            RESET_COUNT="$(find "$READY_DIR" -name "*YTABConfigReset*.deb" | wc -l | tr -d ' ')"
-            if [[ "$RESET_COUNT" -ne 0 ]]; then
-              echo "YTABConfigReset is disabled but still present in ready packages"
-              find "$READY_DIR" -name "*YTABConfigReset*.deb" -print
-              exit 1
-            fi
+          RESET_COUNT="$(find "$READY_DIR" -name "*YTABConfigReset*.deb" | wc -l | tr -d ' ')"
+          if [[ "$RESET_COUNT" -ne 0 ]]; then
+            echo "YTABConfigReset is disabled but still present in ready packages"
+            find "$READY_DIR" -name "*YTABConfigReset*.deb" -print
+            exit 1
+          fi
           fi
           if [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]] && \
-             ! find "$READY_DIR" \( -name "YTUHD*.deb" -o -name "com.ps.ytuhd*.deb" \) \
-                 -print -quit | grep -q .; then
-            echo "YTUHD is enabled but no YTUHD deb is ready"
-            exit 1
+           ! find "$READY_DIR" \( -name "YTUHD*.deb" -o -name "com.ps.ytuhd*.deb" \) \
+               -print -quit | grep -q .; then
+          echo "YTUHD is enabled but no YTUHD deb is ready"
+          exit 1
           fi
 
       - name: Commit Updated Tweak Cache
