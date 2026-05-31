@@ -160,6 +160,30 @@ jobs:
           test -s youtube.ipa
           echo "IPA downloaded: $(du -h youtube.ipa | awk '{print $1}')"
 
+          # ── iPad 지원 추가: UIDeviceFamily에 2(iPad) 포함 ─────────────────
+          echo "Patching UIDeviceFamily for iPad support..."
+          _PLIST_IN_IPA="$(unzip -Z1 youtube.ipa "Payload/*.app/Info.plist" 2>/dev/null | head -1 || true)"
+          if [[ -n "$_PLIST_IN_IPA" ]]; then
+            _IPAD_TMP="$(mktemp -d)"
+            unzip -p youtube.ipa "$_PLIST_IN_IPA" > "$_IPAD_TMP/Info.plist"
+            if ! /usr/libexec/PlistBuddy -c "Print UIDeviceFamily" "$_IPAD_TMP/Info.plist" 2>/dev/null | grep -q "^ *2$"; then
+              _FAM_COUNT="$(/usr/libexec/PlistBuddy -c "Print UIDeviceFamily" "$_IPAD_TMP/Info.plist" 2>/dev/null | grep -c "Integer" || echo 1)"
+              /usr/libexec/PlistBuddy -c "Add UIDeviceFamily:${_FAM_COUNT} integer 2" "$_IPAD_TMP/Info.plist" \
+                && echo "  iPad support added (UIDeviceFamily[${_FAM_COUNT}] = 2)" \
+                || echo "  Warning: PlistBuddy failed, skipping iPad patch"
+            else
+              echo "  UIDeviceFamily already includes iPad"
+            fi
+            mkdir -p "$_IPAD_TMP/$(dirname "$_PLIST_IN_IPA")"
+            cp "$_IPAD_TMP/Info.plist" "$_IPAD_TMP/$_PLIST_IN_IPA"
+            (cd "$_IPAD_TMP" && zip -u "$GITHUB_WORKSPACE/youtube.ipa" "$_PLIST_IN_IPA")
+            rm -rf "$_IPAD_TMP"
+            echo "  IPA repacked with updated Info.plist"
+          else
+            echo "  Warning: Info.plist not found in IPA, skipping iPad patch"
+          fi
+          # ─────────────────────────────────────────────────────────────────────
+
           PLIST_PATH="$(unzip -Z1 youtube.ipa "Payload/*.app/Info.plist" 2>/dev/null | head -1 || true)"
           YT_VERSION=""
           if [[ -n "$PLIST_PATH" ]]; then
