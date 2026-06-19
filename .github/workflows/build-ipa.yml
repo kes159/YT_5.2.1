@@ -76,9 +76,8 @@ jobs:
             ~/.local/bin/cgen
           key: cyan-pyzule-rw-${{ runner.os }}-v3
 
-      # Theos is only needed when we are rebuilding tweaks from source
+      # Theos is always needed (for YTUHD build + optional update mode)
       - name: Cache Theos
-        if: github.event.inputs.update_tweaks == 'true'
         id: theos-cache
         uses: actions/cache@v4
         with:
@@ -94,7 +93,6 @@ jobs:
           for pkg in make ldid dpkg; do
             brew list "$pkg" >/dev/null 2>&1 || NEED_BREW+=("$pkg")
           done
-
 
           if [[ ${#NEED_BREW[@]} -gt 1 ]]; then
             NEED_BREW=("${NEED_BREW[@]:1}")
@@ -120,6 +118,19 @@ jobs:
           command -v cyan >/dev/null
           echo "cyan: $(command -v cyan)"
 
+      - name: Setup Theos
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.theos-cache.outputs.cache-hit }}" != "true" ]]; then
+            git clone --depth 1 --recurse-submodules https://github.com/theos/theos.git "$THEOS"
+            mkdir -p "$THEOS/sdks"
+            git clone --quiet --depth 1 https://github.com/theos/sdks/ /tmp/theos-sdks
+            mv /tmp/theos-sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
+          else
+            echo "Theos cache hit"
+          fi
+
       - name: Download IPA and Setup Theos
         id: meta
         shell: bash
@@ -131,23 +142,10 @@ jobs:
             URL="${URL/dl=0/dl=1}"
           fi
 
-          # Start IPA download in the background while setting up Theos (update mode)
+          # Start IPA download in the background
           curl -L --fail --retry 8 --retry-delay 5 --connect-timeout 30 \
             -A "Mozilla/5.0" "$URL" -o youtube.ipa &
           IPA_PID=$!
-
-          if [[ "${{ github.event.inputs.update_tweaks }}" == "true" ]]; then
-            if [[ "${{ steps.theos-cache.outputs.cache-hit }}" != "true" ]]; then
-              git clone --depth 1 --recurse-submodules https://github.com/theos/theos.git "$THEOS"
-              mkdir -p "$THEOS/sdks"
-              git clone --quiet --depth 1 https://github.com/theos/sdks/ /tmp/theos-sdks
-              mv /tmp/theos-sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
-            else
-              echo "Theos cache hit"
-            fi
-          else
-            echo "Stable mode: Theos setup skipped"
-          fi
 
           wait "$IPA_PID"
           test -s youtube.ipa
@@ -230,15 +228,94 @@ jobs:
       #
       # STABLE MODE  (update_tweaks = false, default)
       #   • Copy .deb files committed to tweaks/ → ready_packages/
+      #   • YTUHD는 항상 https://github.com/Tonwalter888/YTUHD 에서 빌드
       #   • Respects each enable_* flag so disabled tweaks are not injected
-      #   • No network calls to GitHub repos, no Theos build
       #
       # UPDATE MODE  (update_tweaks = true)
       #   • Fetch latest commit SHA for every enabled tweak
       #   • Cache hit  → copy existing .deb from tweaks/
       #   • Cache miss → git clone → make package → save to tweaks/
+      #   • YTUHD는 항상 https://github.com/Tonwalter888/YTUHD 에서 빌드
       #   • Commit any new/updated .deb files back to the repo
       # ════════════════════════════════════════════════════════════════════════
+
+      - name: Build YTUHD from GitHub
+        if: github.event.inputs.enable_ytuhd == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          READY_DIR="${{ github.workspace }}/ready_packages"
+          CACHE_DIR="${{ github.workspace }}/tweaks"
+          mkdir -p "$READY_DIR" "$CACHE_DIR"
+
+          YTUHD_URL="https://github.com/Tonwalter888/YTUHD"
+          YTUHD_REPO_PATH="Tonwalter888/YTUHD"
+
+          echo "=== Building YTUHD from $YTUHD_URL ==="
+
+          # Fetch latest SHA
+          LATEST_SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${YTUHD_REPO_PATH}/commits?per_page=1" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['sha'][:8])" 2>/dev/null || echo unknown)"
+          echo "YTUHD latest SHA: $LATEST_SHA"
+
+          # Check deb cache
+          CACHED="$(find "$CACHE_DIR" -maxdepth 1 -name "YTUHD_${LATEST_SHA}.deb" -print -quit 2>/dev/null || true)"
+          if [[ -n "$CACHED" && "$LATEST_SHA" != "unknown" ]]; then
+            echo "  YTUHD deb cache hit ($LATEST_SHA)"
+            cp "$CACHED" "$READY_DIR/"
+          else
+            echo "  YTUHD cache miss, cloning and building..."
+            BUILD_DIR="$(mktemp -d)/YTUHD"
+            git clone --quiet --depth 1 "$YTUHD_URL" "$BUILD_DIR"
+
+            # Clone headers needed for build
+            if [[ ! -d "$THEOS/include/YouTubeHeader" ]]; then
+              git clone --quiet --depth 1 https://github.com/PoomSmart/YouTubeHeader.git /tmp/YouTubeHeader
+              mkdir -p "$THEOS/include/YouTubeHeader"
+              rsync -a --exclude='.git' /tmp/YouTubeHeader/ "$THEOS/include/YouTubeHeader/"
+              rsync -a --exclude='.git' /tmp/YouTubeHeader/ "$THEOS/include/"
+            fi
+            if [[ ! -d "$THEOS/include/PSHeader" ]]; then
+              git clone --quiet --depth 1 https://github.com/PoomSmart/PSHeader.git /tmp/PSHeader
+              rm -rf /tmp/PSHeader/CoreImage
+              mkdir -p "$THEOS/include/PSHeader"
+              rsync -a --exclude='.git' /tmp/PSHeader/ "$THEOS/include/PSHeader/"
+              rsync -a --exclude='.git' /tmp/PSHeader/ "$THEOS/include/"
+            fi
+
+            export DEBUG=0 FINALPACKAGE=1 SIDELOAD=1 SDKVERSION=16.5
+            pushd "$BUILD_DIR" >/dev/null
+            make clean >/dev/null 2>&1 || true
+            if make -j"$(sysctl -n hw.ncpu)" package >/tmp/build_YTUHD.log 2>&1; then
+              for deb in packages/*.deb; do
+                [[ -f "$deb" ]] || continue
+                cp "$deb" "$READY_DIR/"
+                if [[ "$LATEST_SHA" != "unknown" ]]; then
+                  rm -f "$CACHE_DIR/YTUHD_"*.deb
+                  cp "$deb" "$CACHE_DIR/YTUHD_${LATEST_SHA}.deb"
+                fi
+                echo "  built YTUHD: $(basename "$deb")"
+              done
+            else
+              echo "  YTUHD build failed"
+              tail -40 /tmp/build_YTUHD.log
+              exit 1
+            fi
+            popd >/dev/null
+          fi
+
+          # Validate
+          if ! find "$READY_DIR" \( -name "YTUHD*.deb" -o -name "com.ps.ytuhd*.deb" \
+               -o -name "dev.water888.ytuhd*.deb" \) -print -quit | grep -q .; then
+            echo "ERROR: YTUHD deb not found in ready_packages after build"
+            exit 1
+          fi
+          echo "YTUHD_CACHE_SHA=$LATEST_SHA" >> "$GITHUB_ENV"
+
       - name: Prepare Tweaks (Stable Mode)
         if: github.event.inputs.update_tweaks != 'true'
         shell: bash
@@ -251,104 +328,97 @@ jobs:
 
           echo "=== STABLE MODE: using pinned .deb files from tweaks/ ==="
 
-            # Deduplicate: for each tweak key keep only the newest file (by mtime).
-            # Uses a temp dir instead of declare -A to stay compatible with all shells.
-            DEDUP_DIR="$(mktemp -d)"
+          # Deduplicate: for each tweak key keep only the newest file (by mtime).
+          DEDUP_DIR="$(mktemp -d)"
 
-            tweak_key() {
-              local f="$1"
-              for k in YouGroupSettings YTVideoOverlay YouPiP YTUHD \
-                        YouQuality YouChooseQuality Return-YouTube-Dislikes \
-                        YTABConfigReset YTABConfig DontEatMyContent \
-                        YouLoop YouSpeed libundirect; do
-                [[ "$f" == *"$k"* ]] && { echo "$k"; return; }
-              done
-              echo "__other__:$f"
-            }
-
-            for deb in "$CACHE_DIR"/*.deb; do
-              [[ -f "$deb" ]] || continue
-              key="$(tweak_key "$(basename "$deb")")"
-              # sanitize key for use as filename
-              safe_key="${key//[^a-zA-Z0-9_-]/_}"
-              slot="$DEDUP_DIR/$safe_key"
-              if [[ -f "$slot" ]]; then
-                existing="$(cat "$slot")"
-                [[ "$deb" -nt "$existing" ]] && echo "$deb" > "$slot"
-              else
-                echo "$deb" > "$slot"
-              fi
+          tweak_key() {
+            local f="$1"
+            for k in YouGroupSettings YTVideoOverlay YouPiP YTUHD \
+                      YouQuality YouChooseQuality Return-YouTube-Dislikes \
+                      YTABConfigReset YTABConfig DontEatMyContent \
+                      YouLoop YouSpeed; do
+              [[ "$f" == *"$k"* ]] && { echo "$k"; return; }
             done
+            echo "__other__:$f"
+          }
 
-            count=0
-            for slot in "$DEDUP_DIR"/*; do
-              [[ -f "$slot" ]] || continue
-              deb="$(cat "$slot")"
-              [[ -f "$deb" ]] || continue
-              fname="$(basename "$deb")"
+          for deb in "$CACHE_DIR"/*.deb; do
+            [[ -f "$deb" ]] || continue
+            # YTUHD는 Build YTUHD 스텝에서 이미 처리됨 → skip
+            case "$(basename "$deb")" in
+              *YTUHD*|*ytuhd*) echo "  skip (managed by Build YTUHD step): $(basename "$deb")"; continue ;;
+            esac
+            key="$(tweak_key "$(basename "$deb")")"
+            safe_key="${key//[^a-zA-Z0-9_-]/_}"
+            slot="$DEDUP_DIR/$safe_key"
+            if [[ -f "$slot" ]]; then
+              existing="$(cat "$slot")"
+              [[ "$deb" -nt "$existing" ]] && echo "$deb" > "$slot"
+            else
+              echo "$deb" > "$slot"
+            fi
+          done
 
-              # Skip debs whose feature flag is disabled.
-              # Note: YTABConfigReset must be checked BEFORE YTABConfig.
-              case "$fname" in
-                *YTUHD*|*ytuhd*)
-                  [[ "${{ github.event.inputs.enable_ytuhd }}"       == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *YouPiP*)
-                  [[ "${{ github.event.inputs.enable_youpip }}"      == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *YouChooseQuality*)
-                  [[ "${{ github.event.inputs.enable_ycq }}"         == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *YouQuality*)
-                  [[ "${{ github.event.inputs.enable_yq }}"          == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *Return-YouTube-Dislikes*|*ReturnYouTubeDislikes*)
-                  [[ "${{ github.event.inputs.enable_ryd }}"         == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *YTABConfigReset*)
-                  [[ "${{ github.event.inputs.enable_ytabc_reset }}" == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *YTABConfig*)
-                  [[ "${{ github.event.inputs.enable_ytabc }}"       == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *DontEatMyContent*)
-                  [[ "${{ github.event.inputs.enable_demc }}"        == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *YouLoop*)
-                  [[ "${{ github.event.inputs.enable_youloop }}"     == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                *YouSpeed*)
-                  [[ "${{ github.event.inputs.enable_youspeed }}"    == "true" ]] \
-                    || { echo "  skip (disabled): $fname"; continue; } ;;
-                # Always include: YouGroupSettings, YTVideoOverlay, libundirect, etc.
-              esac
+          count=0
+          for slot in "$DEDUP_DIR"/*; do
+            [[ -f "$slot" ]] || continue
+            deb="$(cat "$slot")"
+            [[ -f "$deb" ]] || continue
+            fname="$(basename "$deb")"
 
-              cp "$deb" "$READY_DIR/"
-              echo "  copied $fname"
-              count=$((count + 1))
+            # Skip debs whose feature flag is disabled.
+            # Note: YTABConfigReset must be checked BEFORE YTABConfig.
+            case "$fname" in
+              *YouPiP*)
+                [[ "${{ github.event.inputs.enable_youpip }}"      == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              *YouChooseQuality*)
+                [[ "${{ github.event.inputs.enable_ycq }}"         == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              *YouQuality*)
+                [[ "${{ github.event.inputs.enable_yq }}"          == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              *Return-YouTube-Dislikes*|*ReturnYouTubeDislikes*)
+                [[ "${{ github.event.inputs.enable_ryd }}"         == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              *YTABConfigReset*)
+                [[ "${{ github.event.inputs.enable_ytabc_reset }}" == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              *YTABConfig*)
+                [[ "${{ github.event.inputs.enable_ytabc }}"       == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              *DontEatMyContent*)
+                [[ "${{ github.event.inputs.enable_demc }}"        == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              *YouLoop*)
+                [[ "${{ github.event.inputs.enable_youloop }}"     == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              *YouSpeed*)
+                [[ "${{ github.event.inputs.enable_youspeed }}"    == "true" ]] \
+                  || { echo "  skip (disabled): $fname"; continue; } ;;
+              # Always include: YouGroupSettings, YTVideoOverlay, etc.
+            esac
+
+            cp "$deb" "$READY_DIR/"
+            echo "  copied $fname"
+            count=$((count + 1))
+          done
+
+          # .appex 복사 (enable_opensafari가 true일 때만)
+          if [[ "${{ github.event.inputs.enable_opensafari }}" == "true" ]]; then
+            for appex_zip in "$CACHE_DIR"/*.appex.zip; do
+              [[ -f "$appex_zip" ]] || continue
+              unzip -o "$appex_zip" -d "$READY_DIR/"
+              echo "  unzipped $(basename "$appex_zip")"
             done
-            # .appex 복사 (enable_opensafari가 true일 때만)
-            if [[ "${{ github.event.inputs.enable_opensafari }}" == "true" ]]; then
-              for appex_zip in "$CACHE_DIR"/*.appex.zip; do
-                [[ -f "$appex_zip" ]] || continue
-                unzip -o "$appex_zip" -d "$READY_DIR/"
-                echo "  unzipped $(basename "$appex_zip")"
-              done
-              for appex in "$CACHE_DIR"/*.appex; do
-                [[ -f "$appex" ]] || continue
-                cp "$appex" "$READY_DIR/"
-                echo "  copied $(basename "$appex")"
-              done
-            fi
+            for appex in "$CACHE_DIR"/*.appex; do
+              [[ -f "$appex" ]] || continue
+              cp "$appex" "$READY_DIR/"
+              echo "  copied $(basename "$appex")"
+            done
+          fi
 
-
-            if [[ "$count" -eq 0 ]]; then
-              echo "ERROR: No .deb files found in tweaks/."
-              echo "Run this workflow once with 'Check for Tweak Updates' enabled to populate the cache."
-              exit 1
-            fi
-
-            echo "CACHE_UPDATED=false" >> "$GITHUB_ENV"
+          echo "CACHE_UPDATED=false" >> "$GITHUB_ENV"
 
       - name: Prepare Tweaks (Update Mode)
         if: github.event.inputs.update_tweaks == 'true'
@@ -378,7 +448,7 @@ jobs:
             "Return-YouTube-Dislikes|https://github.com/PoomSmart/Return-YouTube-Dislikes.git|${{ github.event.inputs.enable_ryd }}"
             "YouLoop|https://github.com/bhackel/YouLoop.git|${{ github.event.inputs.enable_youloop }}"
             "YouSpeed|https://github.com/PoomSmart/YouSpeed.git|${{ github.event.inputs.enable_youspeed }}"
-            # YTUHD: 로컬 tweaks/ 폴더의 고정 .deb 파일 사용 (repo 빌드 안 함)
+            # YTUHD: Build YTUHD 스텝에서 별도 처리 (Tonwalter888/YTUHD 빌드)
           )
 
           HEADER_ONLY="YouTubeHeader PSHeader"
@@ -493,25 +563,13 @@ jobs:
               echo "  skip (managed by repo): $(basename "$deb")"
               continue
             fi
+            # YTUHD는 Build YTUHD 스텝에서 이미 처리됨 → skip
+            case "$(basename "$deb")" in
+              *YTUHD*|*ytuhd*) echo "  skip (managed by Build YTUHD step): $(basename "$deb")"; continue ;;
+            esac
             cp "$deb" "$READY_DIR/"
             echo "  copied $(basename "$deb")"
           done
-
-          # ── YTUHD: 로컬 고정 .deb 파일 직접 사용 ────────────────────────────
-          if [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]]; then
-            YTUHD_DEB="$CACHE_DIR/dev.water888.ytuhd_1.13.4_iphoneos-arm64e.deb"
-            if [[ -f "$YTUHD_DEB" ]]; then
-              cp "$YTUHD_DEB" "$READY_DIR/"
-              echo "  copied YTUHD (local pinned): $(basename "$YTUHD_DEB")"
-            else
-              echo "ERROR: YTUHD deb not found at $YTUHD_DEB"
-              echo "Please commit dev.water888.ytuhd_1.13.4_iphoneos-arm64e.deb into the tweaks/ folder."
-              exit 1
-            fi
-          else
-            echo "  skip YTUHD (disabled)"
-          fi
-          # ─────────────────────────────────────────────────────────────────────
 
           echo "Prepare pinned YouGroupSettings dependency"
           cache_repo_deb_version "https://repo.chariz.com" "com.ps.yougroupsettings" \
@@ -654,28 +712,28 @@ jobs:
           ls -lh "$READY_DIR/"
           DEB_COUNT="$(find "$READY_DIR" -name "*.deb" | wc -l | tr -d ' ')"
           if [[ "$DEB_COUNT" -eq 0 ]]; then
-          echo "No deb files to inject"; exit 1
+            echo "No deb files to inject"; exit 1
           fi
           YGS_COUNT="$(find "$READY_DIR" -name "*YouGroupSettings*.deb" | wc -l | tr -d ' ')"
           if [[ "$YGS_COUNT" -ne 1 ]]; then
-          echo "Expected exactly one YouGroupSettings deb, found $YGS_COUNT"
-          find "$READY_DIR" -name "*YouGroupSettings*.deb" -print
-          exit 1
-          fi
-          if [[ "${{ github.event.inputs.enable_ytabc_reset }}" != "true" ]]; then
-          RESET_COUNT="$(find "$READY_DIR" -name "*YTABConfigReset*.deb" | wc -l | tr -d ' ')"
-          if [[ "$RESET_COUNT" -ne 0 ]]; then
-            echo "YTABConfigReset is disabled but still present in ready packages"
-            find "$READY_DIR" -name "*YTABConfigReset*.deb" -print
+            echo "Expected exactly one YouGroupSettings deb, found $YGS_COUNT"
+            find "$READY_DIR" -name "*YouGroupSettings*.deb" -print
             exit 1
           fi
+          if [[ "${{ github.event.inputs.enable_ytabc_reset }}" != "true" ]]; then
+            RESET_COUNT="$(find "$READY_DIR" -name "*YTABConfigReset*.deb" | wc -l | tr -d ' ')"
+            if [[ "$RESET_COUNT" -ne 0 ]]; then
+              echo "YTABConfigReset is disabled but still present in ready packages"
+              find "$READY_DIR" -name "*YTABConfigReset*.deb" -print
+              exit 1
+            fi
           fi
           if [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]] && \
-           ! find "$READY_DIR" \( -name "YTUHD*.deb" -o -name "com.ps.ytuhd*.deb" \
-               -o -name "dev.water888.ytuhd*.deb" \) \
-               -print -quit | grep -q .; then
-          echo "YTUHD is enabled but no YTUHD deb is ready"
-          exit 1
+             ! find "$READY_DIR" \( -name "YTUHD*.deb" -o -name "com.ps.ytuhd*.deb" \
+                 -o -name "dev.water888.ytuhd*.deb" \) \
+                 -print -quit | grep -q .; then
+            echo "YTUHD is enabled but no YTUHD deb is ready"
+            exit 1
           fi
 
       - name: Commit Updated Tweak Cache
@@ -704,7 +762,7 @@ jobs:
 
           # Build injection order: priority packages first, then the rest
           DEBS=("")
-          for pattern in "libundirect" "YouGroupSettings" "YTVideoOverlay" "YTABConfig" "YTABConfigReset"; do
+          for pattern in "YouGroupSettings" "YTVideoOverlay" "YTABConfig" "YTABConfigReset"; do
             while IFS= read -r deb; do
               [[ -n "$deb" ]] || continue
               DEBS+=("$deb")
@@ -713,7 +771,7 @@ jobs:
           while IFS= read -r deb; do
             [[ -n "$deb" ]] || continue
             case "$(basename "$deb")" in
-              *libundirect*.deb|*YouGroupSettings*.deb|*YTVideoOverlay*.deb|\
+              *YouGroupSettings*.deb|*YTVideoOverlay*.deb|\
               *YTABConfig*.deb|*YTABConfigReset*.deb) continue ;;
             esac
             DEBS+=("$deb")
@@ -748,4 +806,3 @@ jobs:
           overwrite_files: true
           make_latest: true
           token: ${{ secrets.GITHUB_TOKEN }}
-          
