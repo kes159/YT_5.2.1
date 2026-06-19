@@ -95,13 +95,6 @@ jobs:
             brew list "$pkg" >/dev/null 2>&1 || NEED_BREW+=("$pkg")
           done
 
-          # meson/ninja are only required when building YTUHD from source
-          if [[ "${{ github.event.inputs.update_tweaks }}" == "true" && \
-                "${{ github.event.inputs.enable_ytuhd }}"  == "true" ]]; then
-            for pkg in meson ninja; do
-              brew list "$pkg" >/dev/null 2>&1 || NEED_BREW+=("$pkg")
-            done
-          fi
 
           if [[ ${#NEED_BREW[@]} -gt 1 ]]; then
             NEED_BREW=("${NEED_BREW[@]:1}")
@@ -297,7 +290,7 @@ jobs:
               # Skip debs whose feature flag is disabled.
               # Note: YTABConfigReset must be checked BEFORE YTABConfig.
               case "$fname" in
-                *YTUHD*)
+                *YTUHD*|*ytuhd*)
                   [[ "${{ github.event.inputs.enable_ytuhd }}"       == "true" ]] \
                     || { echo "  skip (disabled): $fname"; continue; } ;;
                 *YouPiP*)
@@ -385,7 +378,7 @@ jobs:
             "Return-YouTube-Dislikes|https://github.com/PoomSmart/Return-YouTube-Dislikes.git|${{ github.event.inputs.enable_ryd }}"
             "YouLoop|https://github.com/bhackel/YouLoop.git|${{ github.event.inputs.enable_youloop }}"
             "YouSpeed|https://github.com/PoomSmart/YouSpeed.git|${{ github.event.inputs.enable_youspeed }}"
-            "YTUHD|https://github.com/PoomSmart/YTUHD.git|${{ github.event.inputs.enable_ytuhd }}"
+            # YTUHD: 로컬 tweaks/ 폴더의 고정 .deb 파일 사용 (repo 빌드 안 함)
           )
 
           HEADER_ONLY="YouTubeHeader PSHeader"
@@ -504,6 +497,22 @@ jobs:
             echo "  copied $(basename "$deb")"
           done
 
+          # ── YTUHD: 로컬 고정 .deb 파일 직접 사용 ────────────────────────────
+          if [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]]; then
+            YTUHD_DEB="$CACHE_DIR/dev.water888.ytuhd_1.13.4_iphoneos-arm64e.deb"
+            if [[ -f "$YTUHD_DEB" ]]; then
+              cp "$YTUHD_DEB" "$READY_DIR/"
+              echo "  copied YTUHD (local pinned): $(basename "$YTUHD_DEB")"
+            else
+              echo "ERROR: YTUHD deb not found at $YTUHD_DEB"
+              echo "Please commit dev.water888.ytuhd_1.13.4_iphoneos-arm64e.deb into the tweaks/ folder."
+              exit 1
+            fi
+          else
+            echo "  skip YTUHD (disabled)"
+          fi
+          # ─────────────────────────────────────────────────────────────────────
+
           echo "Prepare pinned YouGroupSettings dependency"
           cache_repo_deb_version "https://repo.chariz.com" "com.ps.yougroupsettings" \
             "1.0.7" "YouGroupSettings" "YouGroupSettings_1.0.7.deb"
@@ -526,16 +535,9 @@ jobs:
             [[ "$ENABLED" == "true" ]] || continue
             REPO_PATH="$(echo "$URL" | sed 's|https://github.com/||;s|\.git$||')"
             (
-              YTUHD_REF="${{ github.event.inputs.ytuhd_ref }}"
-              if [[ "$NAME" == "YTUHD" && -n "$YTUHD_REF" && "$YTUHD_REF" != "master" ]]; then
-                SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-                  "https://api.github.com/repos/$REPO_PATH/commits/$YTUHD_REF" \
-                  | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'][:8])" 2>/dev/null || echo unknown)"
-              else
-                SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-                  "https://api.github.com/repos/$REPO_PATH/commits?per_page=1" \
-                  | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['sha'][:8])" 2>/dev/null || echo unknown)"
-              fi
+              SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+                "https://api.github.com/repos/$REPO_PATH/commits?per_page=1" \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['sha'][:8])" 2>/dev/null || echo unknown)"
               echo "$SHA" > "$SHA_STORE/${NAME}.sha"
             ) &
             SHA_PIDS+=("$!")
@@ -574,13 +576,7 @@ jobs:
                 fi
               else
                 echo "  clone $NAME ($LATEST_SHA)"
-                YTUHD_REF="${{ github.event.inputs.ytuhd_ref }}"
-                if [[ "$NAME" == "YTUHD" && -n "$YTUHD_REF" && "$YTUHD_REF" != "master" ]]; then
-                  git clone --quiet --depth 1 --branch "$YTUHD_REF" \
-                    --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
-                else
-                  git clone --quiet --depth 1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
-                fi
+                git clone --quiet --depth 1 --recurse-submodules "$URL" "$BUILD_DIR/$NAME" &
                 CLONE_PIDS+=("$!"); CLONE_LIST+=("$NAME")
               fi
             fi
@@ -624,66 +620,6 @@ jobs:
 
             [[ -d "$DIR" ]] || continue
             (
-              if [[ "$NAME" == "YTUHD" ]]; then
-                if [[ -d "$DIR/vendor/libvpx" && ! -f "$DIR/vendor/libvpx_ios/libvpx.a" ]]; then
-                  echo "  building YTUHD libvpx..."
-                  pushd "$DIR/vendor/libvpx" >/dev/null
-                  make distclean >/dev/null 2>&1 || true
-                  ./configure --target=arm64-darwin-gcc \
-                    --disable-examples --disable-tools --disable-docs \
-                    --disable-unit-tests --disable-webm-io \
-                    --enable-vp9-decoder --enable-pic > /tmp/build_YTUHD_libvpx.log 2>&1
-                  make -j"$(sysctl -n hw.ncpu)" libvpx.a >> /tmp/build_YTUHD_libvpx.log 2>&1
-                  mkdir -p "$DIR/vendor/libvpx_ios"
-                  cp libvpx.a "$DIR/vendor/libvpx_ios/libvpx.a"
-                  popd >/dev/null
-                fi
-
-                if [[ -d "$DIR/vendor/dav1d" && ! -f "$DIR/vendor/dav1d_ios/libdav1d.a" ]]; then
-                  echo "  building YTUHD dav1d..."
-                  SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
-                  CLANG_PATH="$(xcrun --sdk iphoneos --find clang)"
-                  AR_PATH="$(xcrun --sdk iphoneos --find ar)"
-                  STRIP_PATH="$(xcrun --sdk iphoneos --find strip)"
-                  CROSS_FILE="$DIR/vendor/dav1d/ios-arm64-cross.txt"
-                  {
-                    echo "[binaries]"
-                    echo "c = '$CLANG_PATH'"
-                    echo "ar = '$AR_PATH'"
-                    echo "strip = '$STRIP_PATH'"
-                    echo ""
-                    echo "[host_machine]"
-                    echo "system = 'darwin'"
-                    echo "cpu_family = 'aarch64'"
-                    echo "cpu = 'arm64'"
-                    echo "endian = 'little'"
-                    echo ""
-                    echo "[built-in options]"
-                    echo "c_args = ['-arch', 'arm64', '-isysroot', '$SDK_PATH', '-miphoneos-version-min=11.0']"
-                    echo "c_link_args = ['-arch', 'arm64', '-isysroot', '$SDK_PATH', '-miphoneos-version-min=11.0']"
-                  } > "$CROSS_FILE"
-
-                  rm -rf "$DIR/vendor/dav1d/build-ios"
-                  meson setup "$DIR/vendor/dav1d/build-ios" "$DIR/vendor/dav1d" \
-                    --cross-file "$CROSS_FILE" \
-                    --default-library static \
-                    -Denable_tools=false \
-                    -Denable_tests=false \
-                    -Denable_examples=false \
-                    -Denable_docs=false \
-                    -Denable_asm=false > /tmp/build_YTUHD_dav1d.log 2>&1
-                  ninja -C "$DIR/vendor/dav1d/build-ios" >> /tmp/build_YTUHD_dav1d.log 2>&1
-                  mkdir -p "$DIR/vendor/dav1d_ios"
-                  DAV1D_LIB="$(find "$DIR/vendor/dav1d/build-ios" -name "libdav1d.a" -print -quit)"
-                  if [[ -z "$DAV1D_LIB" ]]; then
-                    echo "  dav1d build did not produce libdav1d.a"
-                    tail -80 /tmp/build_YTUHD_dav1d.log || true
-                    exit 1
-                  fi
-                  cp "$DAV1D_LIB" "$DIR/vendor/dav1d_ios/libdav1d.a"
-                fi
-              fi
-
               pushd "$DIR" >/dev/null
               if [[ -f Makefile ]]; then
                 make clean >/dev/null 2>&1 || true
@@ -735,7 +671,8 @@ jobs:
           fi
           fi
           if [[ "${{ github.event.inputs.enable_ytuhd }}" == "true" ]] && \
-           ! find "$READY_DIR" \( -name "YTUHD*.deb" -o -name "com.ps.ytuhd*.deb" \) \
+           ! find "$READY_DIR" \( -name "YTUHD*.deb" -o -name "com.ps.ytuhd*.deb" \
+               -o -name "dev.water888.ytuhd*.deb" \) \
                -print -quit | grep -q .; then
           echo "YTUHD is enabled but no YTUHD deb is ready"
           exit 1
